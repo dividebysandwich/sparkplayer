@@ -16,6 +16,7 @@ pub enum VisMode {
     Spectrogram,
     Lissajous,
     Spectrum3D,
+    Cassette,
 }
 
 impl VisMode {
@@ -27,6 +28,7 @@ impl VisMode {
             VisMode::Spectrogram => "Spectrogram",
             VisMode::Lissajous => "Stereo X/Y",
             VisMode::Spectrum3D => "Spectrum 3D",
+            VisMode::Cassette => "Cassette Tape",
         }
     }
     pub fn cycle(self) -> Self {
@@ -36,7 +38,8 @@ impl VisMode {
             VisMode::ScrollingWaveform => VisMode::Spectrogram,
             VisMode::Spectrogram => VisMode::Lissajous,
             VisMode::Lissajous => VisMode::Spectrum3D,
-            VisMode::Spectrum3D => VisMode::Spectrum,
+            VisMode::Spectrum3D => VisMode::Cassette,
+            VisMode::Cassette => VisMode::Spectrum,
         }
     }
 }
@@ -56,6 +59,8 @@ pub struct Visualizer {
     pub spectrum_3d_rows: VecDeque<Vec<f32>>,
     last_waveform: Vec<f32>,
     last_lissajous: Vec<(f32, f32)>,
+    cassette_phase: f32,
+    last_consumed_for_cassette: u64,
     pub mode: VisMode,
 }
 
@@ -85,8 +90,36 @@ impl Visualizer {
             spectrum_3d_rows: VecDeque::new(),
             last_waveform: Vec::new(),
             last_lissajous: Vec::new(),
+            cassette_phase: 0.0,
+            last_consumed_for_cassette: 0,
             mode: VisMode::Spectrum,
         }
+    }
+
+    /// Advance the cassette spindle phase based on samples played since the
+    /// last call, returning the current angle in radians. Holds steady when
+    /// playback is paused.
+    pub fn cassette_phase(&mut self, tap: &SampleBuffer, active: bool) -> f32 {
+        let consumed = tap.samples_consumed();
+        if !active {
+            self.last_consumed_for_cassette = consumed;
+            return self.cassette_phase;
+        }
+        let channels = tap.channels().max(1) as u64;
+        let sr = tap.sample_rate().max(1) as f32;
+        let new_frames = consumed.saturating_sub(self.last_consumed_for_cassette) / channels;
+        self.last_consumed_for_cassette = consumed;
+        let dt = new_frames as f32 / sr;
+        // Roughly one revolution per five seconds — slow enough that the eye
+        // tracks individual spokes via subpixel steps.
+        let revs_per_sec = 0.2;
+        self.cassette_phase += dt * revs_per_sec * std::f32::consts::TAU;
+        // Wrap to keep precision over long sessions.
+        let tau = std::f32::consts::TAU;
+        if self.cassette_phase > tau * 1024.0 {
+            self.cassette_phase = self.cassette_phase.rem_euclid(tau);
+        }
+        self.cassette_phase
     }
 
     fn compute_fft(&mut self, tap: &SampleBuffer) {

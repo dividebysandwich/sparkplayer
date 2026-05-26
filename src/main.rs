@@ -165,6 +165,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<()> {
         KeyCode::Char('n') => app.next_track()?,
         KeyCode::Char('p') => app.prev_track()?,
         KeyCode::Char('v') => app.visualizer.toggle_mode(),
+        KeyCode::Char('f') => app.fullscreen_vis = !app.fullscreen_vis,
         KeyCode::Char('r') => app.cycle_repeat(),
         KeyCode::Char('s') => app.toggle_shuffle(),
         KeyCode::Char('a') => app.queue_selected_browser(),

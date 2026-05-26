@@ -64,7 +64,8 @@ Modes
 
 | Key                | Action                                  |
 |--------------------|-----------------------------------------|
-| `v`                | Cycle visualizer: FFT bars, waveform, scrolling waveform, spectrogram |
+| `v`                | Cycle visualizer: FFT bars, waveform, scrolling waveform, spectrogram, stereo X/Y, spectrum 3D, cassette tape |
+| `f`                | Toggle fullscreen visualizer            |
 | `r`                | Cycle repeat mode: Off, All, One        |
 | `s`                | Shuffle the remaining tracks            |
 

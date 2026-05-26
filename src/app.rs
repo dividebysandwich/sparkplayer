@@ -92,6 +92,7 @@ pub struct App {
 
     pub should_quit: bool,
     pub show_help: bool,
+    pub fullscreen_vis: bool,
 
     graphics_choice: GraphicsChoice,
 }
@@ -131,6 +132,7 @@ impl App {
             last_artwork_key: None,
             should_quit: false,
             show_help: false,
+            fullscreen_vis: false,
             graphics_choice,
         };
         app.refresh_browser();
