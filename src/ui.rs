@@ -362,7 +362,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         " ⏹ Stopped "
     };
-    let line = Line::from(vec![
+    let mut badges = vec![
         Span::styled(
             mode_label,
             Style::default()
@@ -386,8 +386,23 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(NEON_PINK)
                 .add_modifier(Modifier::BOLD),
         ),
-    ]);
-    frame.render_widget(Paragraph::new(line), inner_layout[4]);
+    ];
+    if app.video.is_some() {
+        let mode = if app.auto_av_offset { "auto" } else { "manual" };
+        badges.push(Span::raw("  "));
+        badges.push(Span::styled(
+            format!(
+                " A/V: {:+.0} ms ({}) ",
+                app.av_offset_secs * 1000.0,
+                mode
+            ),
+            Style::default()
+                .fg(Color::Black)
+                .bg(NEON_CYAN)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(badges)), inner_layout[4]);
 
     draw_volume_column(frame, cols[1], app.player.volume());
 }

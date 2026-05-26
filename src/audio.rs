@@ -193,11 +193,21 @@ pub struct FfmpegAudioSource {
     decoder: ffmpeg::codec::decoder::Audio,
     resampler: Resampler,
     stream_index: usize,
+    stream_time_base: ffmpeg::Rational,
     out_channels: u16,
     out_rate: u32,
     duration: Option<Duration>,
     buffer: VecDeque<f32>,
     finished: bool,
+    /// Set on seek. The next decoded frame at-or-after this PTS becomes the
+    /// first sample we emit; earlier ones (from keyframe-aligned demux seek)
+    /// are dropped so the tap's base_offset corresponds to the actual audio.
+    pending_seek_secs: Option<f64>,
+}
+
+enum FrameDisposition {
+    DropAll,
+    Keep { skip_interleaved: usize },
 }
 
 impl FfmpegAudioSource {
@@ -263,32 +273,97 @@ impl FfmpegAudioSource {
             decoder,
             resampler,
             stream_index,
+            stream_time_base: time_base,
             out_channels,
             out_rate,
             duration,
             buffer: VecDeque::with_capacity(8192),
             finished: false,
+            pending_seek_secs: None,
         })
     }
 
-    /// Seek the underlying input to `target` and reset decoder state.
+    /// Seek the underlying input to `target` and reset decoder state. The
+    /// container seek lands on the nearest keyframe ≤ target, which for video
+    /// files can be many seconds before target. `pending_seek_secs` tells the
+    /// decode path to drop samples earlier than `target` so what we emit
+    /// actually starts there.
     pub fn seek(&mut self, target: Duration) -> Result<()> {
         let ts = (target.as_micros() as i64) * (ffmpeg::ffi::AV_TIME_BASE as i64) / 1_000_000;
         self.ictx.seek(ts, ..ts).ok();
         self.decoder.flush();
         self.buffer.clear();
         self.finished = false;
+        self.pending_seek_secs = Some(target.as_secs_f64());
         Ok(())
+    }
+
+    /// Inspect a freshly-decoded frame against `pending_seek_secs` and decide
+    /// whether to drop it entirely, drop a leading slice, or pass it through.
+    fn frame_disposition(&mut self, frame: &Audio) -> FrameDisposition {
+        let Some(target) = self.pending_seek_secs else {
+            return FrameDisposition::Keep { skip_interleaved: 0 };
+        };
+        let Some(pts) = frame.pts() else {
+            self.pending_seek_secs = None;
+            return FrameDisposition::Keep { skip_interleaved: 0 };
+        };
+        let tb_num = self.stream_time_base.numerator() as f64;
+        let tb_den = self.stream_time_base.denominator() as f64;
+        if tb_den == 0.0 {
+            self.pending_seek_secs = None;
+            return FrameDisposition::Keep { skip_interleaved: 0 };
+        }
+        let frame_pts_secs = pts as f64 * tb_num / tb_den;
+        let in_rate = frame.rate() as f64;
+        let frame_dur_secs = if in_rate > 0.0 {
+            frame.samples() as f64 / in_rate
+        } else {
+            0.0
+        };
+        // Entire frame is before target — drop it, keep the seek pending.
+        if frame_pts_secs + frame_dur_secs <= target {
+            return FrameDisposition::DropAll;
+        }
+        // Already at/past target — keep everything, clear the seek.
+        if frame_pts_secs >= target {
+            self.pending_seek_secs = None;
+            return FrameDisposition::Keep { skip_interleaved: 0 };
+        }
+        // Partial overlap: skip the leading (target - frame_pts) seconds.
+        let skip_per_channel =
+            ((target - frame_pts_secs) * self.out_rate as f64).round() as i64;
+        let skip_per_channel = skip_per_channel.max(0) as usize;
+        let skip_interleaved =
+            skip_per_channel.saturating_mul(self.out_channels as usize);
+        self.pending_seek_secs = None;
+        FrameDisposition::Keep { skip_interleaved }
+    }
+
+    /// Resample `decoded`, append to `self.buffer`, then drop the leading
+    /// `skip_interleaved` samples from what was just appended.
+    fn ingest_frame(&mut self, decoded: &Audio) {
+        let skip = match self.frame_disposition(decoded) {
+            FrameDisposition::DropAll => return,
+            FrameDisposition::Keep { skip_interleaved } => skip_interleaved,
+        };
+        let mut resampled = Audio::empty();
+        if self.resampler.run(decoded, &mut resampled).is_err() {
+            return;
+        }
+        let before = self.buffer.len();
+        self.append_samples(&resampled);
+        if skip > 0 {
+            let added = self.buffer.len() - before;
+            let to_drain = skip.min(added);
+            self.buffer.drain(before..before + to_drain);
+        }
     }
 
     fn drain_decoder(&mut self) {
         let mut decoded = Audio::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
-            let mut resampled = Audio::empty();
-            if self.resampler.run(&decoded, &mut resampled).is_err() {
-                continue;
-            }
-            self.append_samples(&resampled);
+            self.ingest_frame(&decoded);
         }
     }
 
@@ -326,10 +401,7 @@ impl FfmpegAudioSource {
             let mut decoded = Audio::empty();
             match self.decoder.receive_frame(&mut decoded) {
                 Ok(()) => {
-                    let mut resampled = Audio::empty();
-                    if self.resampler.run(&decoded, &mut resampled).is_ok() {
-                        self.append_samples(&resampled);
-                    }
+                    self.ingest_frame(&decoded);
                     continue;
                 }
                 Err(ffmpeg::Error::Other { errno })
@@ -524,6 +596,20 @@ impl AudioPlayer {
             self.player.play();
         }
         Ok(())
+    }
+
+    /// Time between a sample being pulled by the mixer (tap increment) and it
+    /// actually leaving the DAC, as far as we can know from inside the process.
+    /// Reads the rodio sink's negotiated CPAL buffer; defaults to 50 ms if the
+    /// backend reports Default/unknown.
+    pub fn output_buffer_latency(&self) -> Duration {
+        let cfg = self.sink.config();
+        let rate = cfg.sample_rate().get().max(1) as f64;
+        let frames = match cfg.buffer_size() {
+            rodio::cpal::BufferSize::Fixed(n) => *n as f64,
+            rodio::cpal::BufferSize::Default => rate * 0.050,
+        };
+        Duration::from_secs_f64(frames / rate)
     }
 
     pub fn toggle_pause(&self) {

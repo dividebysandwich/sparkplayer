@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::widgets::ListState;
@@ -12,15 +12,30 @@ use crate::metadata::{self, TrackMeta};
 use crate::video::VideoStream;
 use crate::visualizer::Visualizer;
 
-/// Default latency between the audio "consumed by mixer" timestamp (what
-/// `app.position()` reports via the tap) and what's actually being heard from
-/// the speakers. The tap counts samples that have been pulled from the source
-/// — those samples then sit in rodio's output ring buffer (typically
-/// 100-400ms, backend-dependent) before they hit DAC. Video frames are
-/// timestamped on the audio clock, so we subtract this offset before picking
-/// the frame to display. Tunable at runtime with `[` / `]`.
-const DEFAULT_AV_OFFSET_SECS: f64 = 0.30;
+/// Empirical baseline for the audio path lag (CPAL ring + OS audio server
+/// queue + DAC) on a typical PulseAudio/PipeWire setup. CPAL can only tell us
+/// its own buffer size; the audio server's queue on top is opaque, so we
+/// can't compute the true lag from inside the process. This 20 ms default
+/// matches what the player shipped with before auto-tracking and is the
+/// starting point in auto mode.
+const BASELINE_AV_OFFSET_SECS: f64 = 0.02;
+/// Multiplier applied to the measured CPAL buffer to estimate the *minimum*
+/// plausible audio-path lag for unusually high-latency backends. Only kicks
+/// in if `cpal_buffer × this > BASELINE`.
+const AV_OFFSET_BACKEND_MULT: f64 = 2.0;
+/// Floor on the slewed offset — never let auto-tracking push the video so
+/// far forward that we'd ask for unready frames.
+const MIN_AV_OFFSET_SECS: f64 = 0.050;
+/// Max change per tick when auto-tracking, so the picture doesn't visibly jump.
+const AV_OFFSET_SLEW_PER_TICK: f64 = 0.005;
 pub const AV_OFFSET_STEP_SECS: f64 = 0.025;
+
+/// Target offset before subtracting render time. Uses the empirical 300 ms
+/// baseline, but bumps higher if the negotiated CPAL buffer × backend mult
+/// implies we're on a particularly high-latency audio path.
+fn baseline_av_offset(audio_lat_secs: f64) -> f64 {
+    (audio_lat_secs * AV_OFFSET_BACKEND_MULT).max(BASELINE_AV_OFFSET_SECS)
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FocusPane {
@@ -105,6 +120,9 @@ pub struct App {
     pub video_protocol: Option<StatefulProtocol>,
     pub video_dims: Option<(u32, u32)>,
     pub av_offset_secs: f64,
+    pub audio_output_latency_secs: f64,
+    pub video_render_ewma_secs: f64,
+    pub auto_av_offset: bool,
 
     pub should_quit: bool,
     pub show_help: bool,
@@ -120,6 +138,8 @@ impl App {
         graphics_choice: GraphicsChoice,
     ) -> Result<Self> {
         let player = AudioPlayer::new()?;
+        let audio_output_latency_secs = player.output_buffer_latency().as_secs_f64();
+        let initial_av_offset = baseline_av_offset(audio_output_latency_secs);
         let visualizer = Visualizer::new();
         let mut playlist_state = ListState::default();
         if !initial_tracks.is_empty() {
@@ -149,7 +169,10 @@ impl App {
             video: None,
             video_protocol: None,
             video_dims: None,
-            av_offset_secs: DEFAULT_AV_OFFSET_SECS,
+            av_offset_secs: initial_av_offset,
+            audio_output_latency_secs,
+            video_render_ewma_secs: 0.0,
+            auto_av_offset: true,
             should_quit: false,
             show_help: false,
             fullscreen_vis: false,
@@ -398,6 +421,7 @@ impl App {
         let Some(picker) = self.picker.as_mut() else {
             return;
         };
+        let started = Instant::now();
         let buf = match image::RgbImage::from_raw(frame.width, frame.height, frame.data) {
             Some(b) => b,
             None => return,
@@ -405,6 +429,21 @@ impl App {
         let dyn_img = image::DynamicImage::ImageRgb8(buf);
         self.video_dims = Some((frame.width, frame.height));
         self.video_protocol = Some(picker.new_resize_protocol(dyn_img));
+        let elapsed = started.elapsed().as_secs_f64();
+        // EWMA alpha=0.1: smooths jitter, converges within ~10 ticks (~330 ms).
+        self.video_render_ewma_secs = if self.video_render_ewma_secs == 0.0 {
+            elapsed
+        } else {
+            self.video_render_ewma_secs * 0.9 + elapsed * 0.1
+        };
+        if self.auto_av_offset {
+            let target = (baseline_av_offset(self.audio_output_latency_secs)
+                - self.video_render_ewma_secs)
+                .max(MIN_AV_OFFSET_SECS);
+            let delta = (target - self.av_offset_secs)
+                .clamp(-AV_OFFSET_SLEW_PER_TICK, AV_OFFSET_SLEW_PER_TICK);
+            self.av_offset_secs += delta;
+        }
     }
 
     pub fn next_track(&mut self) -> Result<()> {
@@ -457,6 +496,14 @@ impl App {
                 let pos = self.player.tap.position();
                 if let Some(video) = self.video.as_ref() {
                     video.seek(pos);
+                }
+                // Drop the render-time EWMA and re-anchor to the baseline:
+                // after seek, the OS audio ring is briefly empty so the
+                // effective lag changes for ~one buffer; slewing from the
+                // pre-seek value would chase a moving target.
+                if self.auto_av_offset {
+                    self.av_offset_secs = baseline_av_offset(self.audio_output_latency_secs);
+                    self.video_render_ewma_secs = 0.0;
                 }
                 self.status = format!(
                     "Seek: {} ({:+.0}s)",
@@ -623,7 +670,11 @@ impl App {
     /// negative pulls it forward.
     pub fn adjust_av_offset(&mut self, delta: f64) {
         self.av_offset_secs = (self.av_offset_secs + delta).clamp(-0.5, 2.0);
-        self.status = format!("A/V offset: {:+.0} ms", self.av_offset_secs * 1000.0);
+        self.auto_av_offset = false;
+        self.status = format!(
+            "A/V offset: {:+.0} ms (manual)",
+            self.av_offset_secs * 1000.0
+        );
     }
 
     pub fn volume_step(&mut self, delta: f32) {
