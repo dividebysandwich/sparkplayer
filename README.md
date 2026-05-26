@@ -1,6 +1,6 @@
 # sparkplayer
 
-A no-nonsense terminal based music player using Ratatui
+A fun, no-nonsense terminal based media player using Ratatui
 
 <img width="1501" height="932" alt="image" src="https://github.com/user-attachments/assets/6f7388cb-c2fb-4b06-8d11-93f82e916906" />
 

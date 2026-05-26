@@ -31,10 +31,14 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
-      - name: Install ALSA development headers
+      - name: Install ALSA + FFmpeg development headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev
+          sudo apt-get install -y \
+            libasound2-dev \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev \
+            pkg-config clang libclang-dev
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -150,8 +154,33 @@ jobs:
         with:
           key: ${{ env.TARGET }}
 
+      - name: Install FFmpeg (shared dev build)
+        shell: pwsh
+        run: |
+          # Prebuilt FFmpeg shared dev build from gyan.dev (LGPL).
+          # ffmpeg-sys-next looks for $FFMPEG_DIR/include and $FFMPEG_DIR/lib.
+          $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z'
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.7z -UseBasicParsing
+          7z x ffmpeg.7z -offmpeg-dist -y | Out-Null
+          $root = (Get-ChildItem ffmpeg-dist -Directory | Select-Object -First 1).FullName
+          echo "FFMPEG_DIR=$root" >> $env:GITHUB_ENV
+          # libclang is needed by bindgen (used by ffmpeg-sys-next).
+          # GitHub's windows-latest image ships LLVM under C:\Program Files\LLVM.
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          # The MSI installer + runtime need the FFmpeg DLLs on PATH; copy them
+          # next to the binary after build.
+          echo "FFMPEG_BIN=$root\bin" >> $env:GITHUB_ENV
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ env.TARGET }}
+
+      - name: Stage FFmpeg DLLs next to the binary
+        shell: pwsh
+        run: |
+          # ffmpeg-release-full-shared ships LGPL-licensed shared libs; place
+          # them alongside sparkplayer.exe so the .zip and MSI are runnable on
+          # systems without FFmpeg installed.
+          Copy-Item "$env:FFMPEG_BIN\*.dll" "target/$env:TARGET/release/" -Force
 
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
@@ -170,6 +199,7 @@ jobs:
           $stage = "sparkplayer-$version-$env:SUFFIX"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/$env:TARGET/release/sparkplayer.exe" "$stage/"
+          Copy-Item "target/$env:TARGET/release/*.dll" "$stage/" -ErrorAction SilentlyContinue
           if (Test-Path README.md) { Copy-Item README.md "$stage/" }
           Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
           echo "ZIP=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append

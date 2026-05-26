@@ -1,15 +1,18 @@
 # Cross-compile configuration for `cross` (https://github.com/cross-rs/cross).
-# These pre-build steps install the target architecture's ALSA development
-# headers inside the cross container so rodio/cpal can link successfully.
+# These pre-build steps install the target architecture's ALSA and FFmpeg
+# development headers inside the cross container so rodio/cpal and
+# ffmpeg-sys-next can link successfully. clang is needed by bindgen.
 
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH"
+    "apt-get update",
+    "apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev"
 ]
 
 [target.armv7-unknown-linux-gnueabihf]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH"
+    "apt-get update",
+    "apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev"
 ]
