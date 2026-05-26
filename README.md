@@ -13,11 +13,14 @@ System dependencies on Linux:
 
 - ALSA development headers (`libasound2-dev` on Debian/Ubuntu,
   `alsa-lib` on Arch, `alsa-lib-devel` on Fedora) for audio output.
+- FFmpeg development libraries (`libavcodec-dev`, `libavformat-dev`,
+  `libavutil-dev`, `libswscale-dev`, `libswresample-dev` on Debian/Ubuntu,
+  `ffmpeg` on Arch, `ffmpeg-devel` on Fedora) for video decoding.
 - A terminal capable of 24-bit color. Most modern terminals qualify
   (Alacritty, Kitty, WezTerm, foot, Ghostty, iTerm2, Windows Terminal, ...).
 - Optional: a terminal that implements a graphics protocol (Kitty, Sixel,
-  or iTerm2 inline images) to render embedded album art as real graphics
-  instead of colored halfblocks.
+  or iTerm2 inline images) to render embedded album art and video as real
+  graphics instead of colored halfblocks.
 
 Build from source:
 
@@ -49,6 +52,7 @@ Playback
 | `Ctrl+Left` / `Ctrl+Right` | Seek backward / forward by 30 seconds |
 | `+` / `=`          | Volume up (5%)                          |
 | `-`                | Volume down (5%)                        |
+| `[` / `]`          | Nudge A/V sync offset by 25 ms (video)  |
 | `Enter`            | Play the highlighted item               |
 
 Navigation
@@ -103,7 +107,29 @@ sparkplayer playlist.pls          # load a PLS playlist
 ```
 
 Supported audio formats: `mp3`, `wav`, `ogg`, `flac`, `m4a`, `aac`,
-`opus`, `wma`. Supported playlist formats: `m3u`, `m3u8`, `pls`.
+`opus`, `wma`. Supported video formats: `mp4`, `mkv`, `avi`, `mov`,
+`webm`, `m4v`. Supported playlist formats: `m3u`, `m3u8`, `pls`.
+
+# Video playback
+
+Video files are decoded with FFmpeg on a background thread and rendered
+in the album-art pane in place of cover artwork. Frames are pulled in
+PTS order and sampled against the audio clock, so picture stays
+synchronised with the soundtrack. Seeking, pausing, and skipping work
+the same as for audio-only tracks.
+
+Picture quality depends on the terminal's graphics protocol:
+
+- Kitty, WezTerm, Ghostty, or iTerm2 render true graphics — choose one
+  of these for the best result.
+- Sixel-capable terminals (foot, mlterm, xterm with `--enable-sixel`)
+  also render real images.
+- Other terminals fall back to 24-bit-color halfblocks, which is
+  watchable but coarse.
+
+If audio and video drift apart, use `[` / `]` to nudge the A/V offset in
+25 ms steps (clamped between −500 ms and +2000 ms). Toggling fullscreen
+with `f` scales the video to fill the whole window.
 
 The browser pane on the left lets you navigate the filesystem; pressing
 `Enter` on a directory descends into it, on a playlist file replaces the
@@ -133,4 +159,4 @@ implement Sixel, Kitty, or iTerm2 inline images.
 
 I am a huge fan of VLC, which is a fantastic piece of software. However for over a decaded now I am irritated by the fact that VLC always seems to alter the pitch of music during playback, especially shortly after pressing play, after scrolling, or skipping to the next song. I have turned off any re-sampling feature in the settings but the issue persists. 
 
-After looking through a bunch of terminal based players, here's SparkPlayer. It's lightweight, runs in the terminal, defaults to your music directory and does exactly what I want it to do. I still love VLC for video playback of course.
+After looking through a bunch of terminal based players, here's SparkPlayer. It's lightweight, runs in the terminal, defaults to your music directory and does exactly what I want it to do. Video playback is supported too, for when a music video shows up next to the album.
