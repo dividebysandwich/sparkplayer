@@ -26,23 +26,23 @@ const BG_PANEL: Color = Color::Rgb(20, 20, 35);
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(area);
-
     if app.fullscreen_vis {
+        // Give the entire screen to the video/visualizer — no footer.
         if app.video_protocol.is_some() {
-            draw_video(frame, outer[0], app);
+            draw_video(frame, area, app);
         } else {
-            draw_visualizer(frame, outer[0], app);
+            draw_visualizer(frame, area, app);
         }
-        draw_footer(frame, outer[1], app);
         if app.show_help {
             draw_help(frame, area);
         }
         return;
     }
+
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1979,6 +1979,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
     let entries: [(&str, &str); 14] = [
         ("?", "Help"),
         ("←→", "Seek 10s"),
+        ("Tab", "Focus"),
         ("Space", "Play/Pause"),
         ("+/-", "Volume"),
         ("v", "Visualizer"),
@@ -1989,7 +1990,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
         ("C", "Clear"),
         ("r", "Repeat"),
         ("s", "Shuffle"),
-        ("Tab", "Focus"),
         ("q", "Quit"),
     ];
 
