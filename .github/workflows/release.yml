@@ -1,0 +1,216 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux x86_64: native build, .zip + .deb
+  # ---------------------------------------------------------------------------
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+      SUFFIX: linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Install ALSA development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ env.TARGET }}
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        run: cargo deb --no-build --target ${{ env.TARGET }}
+
+      - name: Stage zip archive
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          STAGE="sparkplayer-${VERSION}-${SUFFIX}"
+          mkdir -p "${STAGE}"
+          cp "target/${TARGET}/release/sparkplayer" "${STAGE}/"
+          cp README.md "${STAGE}/" || true
+          zip -9r "${STAGE}.zip" "${STAGE}"
+          echo "ZIP=${STAGE}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SUFFIX }}
+          path: |
+            ${{ env.ZIP }}
+            target/${{ env.TARGET }}/debian/*.deb
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux ARM (Raspberry Pi): cross-compiled .zip + .deb for aarch64 and armv7
+  # ---------------------------------------------------------------------------
+  linux-cross:
+    name: Linux ${{ matrix.suffix }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            suffix: linux-aarch64
+          - target: armv7-unknown-linux-gnueabihf
+            suffix: linux-armv7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build release binary with cross
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        # --no-strip: skip host `strip` (it cannot operate on a foreign binary)
+        run: cargo deb --no-build --no-strip --target ${{ matrix.target }}
+
+      - name: Stage zip archive
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          STAGE="sparkplayer-${VERSION}-${{ matrix.suffix }}"
+          mkdir -p "${STAGE}"
+          cp "target/${{ matrix.target }}/release/sparkplayer" "${STAGE}/"
+          cp README.md "${STAGE}/" || true
+          zip -9r "${STAGE}.zip" "${STAGE}"
+          echo "ZIP=${STAGE}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.suffix }}
+          path: |
+            ${{ env.ZIP }}
+            target/${{ matrix.target }}/debian/*.deb
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows x86_64: native build, .zip + .msi
+  # ---------------------------------------------------------------------------
+  windows-x86_64:
+    name: Windows x86_64
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      SUFFIX: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ env.TARGET }}
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Initialize WiX template
+        # The generated wix/main.wxs is not committed; regenerate per build.
+        run: cargo wix init --force
+
+      - name: Build MSI installer
+        run: cargo wix --no-build --nocapture --target ${{ env.TARGET }} --output target/wix
+
+      - name: Stage zip archive
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { 'dev' }
+          $stage = "sparkplayer-$version-$env:SUFFIX"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/$env:TARGET/release/sparkplayer.exe" "$stage/"
+          if (Test-Path README.md) { Copy-Item README.md "$stage/" }
+          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
+          echo "ZIP=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SUFFIX }}
+          path: |
+            ${{ env.ZIP }}
+            target/wix/*.msi
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish a GitHub Release with all artifacts when a v* tag is pushed.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - linux-x86_64
+      - linux-cross
+      - windows-x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.zip" -o -name "*.deb" -o -name "*.msi" \) \
+            -exec cp -v {} release/ \;
+          ls -la release
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
