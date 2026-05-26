@@ -113,8 +113,7 @@ Album art is read from embedded tags (ID3 APIC, MP4 `covr`, FLAC PICTURE,
 Vorbis METADATA_BLOCK_PICTURE) and, if none is embedded, from a sidecar
 file in the same directory named `cover`, `folder`, `front`, `albumart`,
 `album`, or `artwork` with a `.jpg`, `.jpeg`, `.png`, or `.webp`
-extension. When no artwork is found the panel collapses and the
-visualizer expands to fill the space.
+extension.
 
 Command-line options:
 
@@ -126,7 +125,7 @@ Command-line options:
 ```
 
 Use `--graphics` to force a specific renderer when terminal auto-detection
-misses. On Alacritty, only halfblocks will render — the terminal does not
+misses. On terminals such as Alacritty, only halfblocks will render — the terminal does not
 implement Sixel, Kitty, or iTerm2 inline images.
 
 # Motivation
