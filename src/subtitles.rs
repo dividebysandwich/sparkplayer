@@ -5,6 +5,7 @@ use std::thread;
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::Id;
+use ffmpeg::format::stream::Disposition;
 use ffmpeg::media::Type;
 
 #[derive(Debug, Clone)]
@@ -141,13 +142,16 @@ fn extract_embedded(video_path: &Path, cancelled: &AtomicBool) -> Option<Vec<Sub
             continue;
         };
         let meta = stream.metadata();
-        let title = meta.get("title").map(|s| s.to_string());
-        let language = meta.get("language").map(|s| s.to_string());
+        let title = meta
+            .get("title")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let language = meta
+            .get("language")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "und");
         let n = pendings.len() + 1;
-        let label = title.unwrap_or_else(|| match &language {
-            Some(l) => format!("{} (track {n})", l),
-            None => format!("Track {n}"),
-        });
+        let label = build_label(language.as_deref(), title.as_deref(), stream.disposition(), n);
         let tb = stream.time_base();
         pendings.push(Pending {
             index: stream.index(),
@@ -246,6 +250,112 @@ fn extract_embedded(video_path: &Path, cancelled: &AtomicBool) -> Option<Vec<Sub
         .collect();
     tracks.retain(|t| !t.cues.is_empty());
     Some(tracks)
+}
+
+fn build_label(
+    language: Option<&str>,
+    title: Option<&str>,
+    disposition: Disposition,
+    n: usize,
+) -> String {
+    let lang_name = language.map(language_display_name);
+    let mut qualifiers: Vec<&str> = Vec::new();
+    if disposition.contains(Disposition::FORCED) {
+        qualifiers.push("forced");
+    }
+    if disposition.contains(Disposition::HEARING_IMPAIRED) {
+        qualifiers.push("SDH");
+    }
+    if disposition.contains(Disposition::COMMENT) {
+        qualifiers.push("commentary");
+    }
+    // Pull a "(SDH)" / "(Forced)" hint out of a junky title only if the
+    // disposition flags didn't already provide it.
+    if let Some(t) = title {
+        let lower = t.to_ascii_lowercase();
+        if !qualifiers.contains(&"SDH") && (lower.contains("sdh") || lower.contains("hearing")) {
+            qualifiers.push("SDH");
+        }
+        if !qualifiers.contains(&"forced") && lower.contains("forced") {
+            qualifiers.push("forced");
+        }
+        if !qualifiers.contains(&"commentary") && lower.contains("comment") {
+            qualifiers.push("commentary");
+        }
+    }
+    let qual_suffix = if qualifiers.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", qualifiers.join(", "))
+    };
+    match lang_name {
+        Some(name) => format!("{name}{qual_suffix}"),
+        None => {
+            // No usable language code. Fall back to the title only if it looks
+            // human-readable; otherwise use a generic track number. Stream
+            // titles like "DNSP" (e.g. Disney+ remux markers) are short
+            // all-caps acronyms with no spaces — those aren't useful labels.
+            let title_is_meaningful = title
+                .map(|t| t.contains(' ') || t.chars().any(|c| c.is_ascii_lowercase()))
+                .unwrap_or(false);
+            match title {
+                Some(t) if title_is_meaningful => format!("{t}{qual_suffix}"),
+                _ => format!("Track {n}{qual_suffix}"),
+            }
+        }
+    }
+}
+
+/// Map ISO 639-1 / 639-2 / 639-3 codes to English language names. Falls back
+/// to returning the code as-is (uppercased) for codes we don't know.
+fn language_display_name(code: &str) -> String {
+    let key = code.trim().to_ascii_lowercase();
+    let name = match key.as_str() {
+        "en" | "eng" => "English",
+        "de" | "ger" | "deu" => "German",
+        "fr" | "fre" | "fra" => "French",
+        "es" | "spa" => "Spanish",
+        "it" | "ita" => "Italian",
+        "pt" | "por" => "Portuguese",
+        "nl" | "dut" | "nld" => "Dutch",
+        "sv" | "swe" => "Swedish",
+        "no" | "nor" => "Norwegian",
+        "da" | "dan" => "Danish",
+        "fi" | "fin" => "Finnish",
+        "is" | "ice" | "isl" => "Icelandic",
+        "pl" | "pol" => "Polish",
+        "cs" | "cze" | "ces" => "Czech",
+        "sk" | "slo" | "slk" => "Slovak",
+        "hu" | "hun" => "Hungarian",
+        "ro" | "rum" | "ron" => "Romanian",
+        "ru" | "rus" => "Russian",
+        "uk" | "ukr" => "Ukrainian",
+        "bg" | "bul" => "Bulgarian",
+        "sr" | "srp" => "Serbian",
+        "hr" | "hrv" => "Croatian",
+        "sl" | "slv" => "Slovenian",
+        "el" | "gre" | "ell" => "Greek",
+        "tr" | "tur" => "Turkish",
+        "he" | "heb" => "Hebrew",
+        "ar" | "ara" => "Arabic",
+        "fa" | "per" | "fas" => "Persian",
+        "hi" | "hin" => "Hindi",
+        "bn" | "ben" => "Bengali",
+        "ur" | "urd" => "Urdu",
+        "ta" | "tam" => "Tamil",
+        "te" | "tel" => "Telugu",
+        "th" | "tha" => "Thai",
+        "vi" | "vie" => "Vietnamese",
+        "id" | "ind" => "Indonesian",
+        "ms" | "may" | "msa" => "Malay",
+        "fil" | "tgl" => "Filipino",
+        "zh" | "chi" | "zho" => "Chinese",
+        "ja" | "jpn" => "Japanese",
+        "ko" | "kor" => "Korean",
+        "lat" | "la" => "Latin",
+        _ => return code.to_string(),
+    };
+    name.to_string()
 }
 
 fn is_text_codec(id: Id) -> bool {
