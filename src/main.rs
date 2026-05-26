@@ -2,6 +2,7 @@ mod app;
 mod audio;
 mod library;
 mod metadata;
+mod subtitles;
 mod ui;
 mod video;
 mod visualizer;
@@ -173,6 +174,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<()> {
         KeyCode::Char('a') => app.queue_selected_browser(),
         KeyCode::Char('A') => app.queue_browser_directory(),
         KeyCode::Char('C') => app.clear_playlist(),
+        KeyCode::Char('c') => app.cycle_subtitle_track(),
         KeyCode::Char('?') | KeyCode::Char('h') => app.show_help = true,
         KeyCode::Tab => app.focus_next(),
         KeyCode::Up => app.move_selection(-1),

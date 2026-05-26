@@ -9,6 +9,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use crate::audio::AudioPlayer;
 use crate::library::{self, Track};
 use crate::metadata::{self, TrackMeta};
+use crate::subtitles::{self, SubtitleSet};
 use crate::video::VideoStream;
 use crate::visualizer::Visualizer;
 
@@ -124,6 +125,10 @@ pub struct App {
     pub video_render_ewma_secs: f64,
     pub auto_av_offset: bool,
 
+    pub subtitles: SubtitleSet,
+    pub active_subtitle_track: Option<usize>,
+    pub current_subtitle_text: Option<String>,
+
     pub should_quit: bool,
     pub show_help: bool,
     pub fullscreen_vis: bool,
@@ -173,6 +178,9 @@ impl App {
             audio_output_latency_secs,
             video_render_ewma_secs: 0.0,
             auto_av_offset: true,
+            subtitles: SubtitleSet::default(),
+            active_subtitle_track: None,
+            current_subtitle_text: None,
             should_quit: false,
             show_help: false,
             fullscreen_vis: false,
@@ -365,6 +373,9 @@ impl App {
         self.video = None;
         self.video_protocol = None;
         self.video_dims = None;
+        self.subtitles = SubtitleSet::default();
+        self.active_subtitle_track = None;
+        self.current_subtitle_text = None;
 
         match self.player.play_file(&path) {
             Ok(dur_hint) => {
@@ -391,6 +402,7 @@ impl App {
                             self.status = format!("Video decode error: {e}");
                         }
                     }
+                    self.subtitles = subtitles::load_for_video(&path);
                 }
             }
             Err(e) => {
@@ -415,6 +427,9 @@ impl App {
         if pos < 0.0 {
             return;
         }
+        self.current_subtitle_text = self
+            .active_subtitle_track
+            .and_then(|i| self.subtitles.cue_at(i, pos).map(str::to_owned));
         let Some(frame) = video.frame_at(pos) else {
             return;
         };
@@ -613,6 +628,26 @@ impl App {
         } else {
             self.status = String::from("Shuffle: Off");
         }
+    }
+
+    pub fn cycle_subtitle_track(&mut self) {
+        if self.subtitles.tracks.is_empty() {
+            self.active_subtitle_track = None;
+            self.current_subtitle_text = None;
+            self.status = String::from("No subtitles available");
+            return;
+        }
+        let next = match self.active_subtitle_track {
+            None => Some(0),
+            Some(i) if i + 1 < self.subtitles.tracks.len() => Some(i + 1),
+            Some(_) => None,
+        };
+        self.active_subtitle_track = next;
+        self.current_subtitle_text = None;
+        self.status = match next {
+            Some(i) => format!("Subtitles: {}", self.subtitles.tracks[i].label),
+            None => String::from("Subtitles: off"),
+        };
     }
 
     fn shuffle_remaining(&mut self) {
