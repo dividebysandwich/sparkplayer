@@ -219,6 +219,37 @@ fn truncate_path(p: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+fn layout_badges(badges: Vec<Span<'_>>, max_width: usize) -> Vec<Line<'_>> {
+    const SEP: &str = "  ";
+    let sep_w = SEP.len();
+    let mut lines: Vec<Line> = Vec::new();
+    let mut current: Vec<Span> = Vec::new();
+    let mut current_w: usize = 0;
+    for badge in badges {
+        let w = badge.width();
+        let needed = if current.is_empty() {
+            w
+        } else {
+            current_w + sep_w + w
+        };
+        if needed > max_width && !current.is_empty() {
+            lines.push(Line::from(std::mem::take(&mut current)));
+            lines.push(Line::from(""));
+            current_w = 0;
+        }
+        if !current.is_empty() {
+            current.push(Span::raw(SEP));
+            current_w += sep_w;
+        }
+        current_w += w;
+        current.push(badge);
+    }
+    if !current.is_empty() {
+        lines.push(Line::from(current));
+    }
+    lines
+}
+
 fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     let meta = &app.current_meta;
     let title = meta.title.clone().unwrap_or_else(|| {
@@ -362,7 +393,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         " ⏹ Stopped "
     };
-    let mut badges = vec![
+    let mut badges: Vec<Span> = vec![
         Span::styled(
             mode_label,
             Style::default()
@@ -370,7 +401,6 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(NEON_GREEN)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
         Span::styled(
             format!(" Repeat: {} ", app.repeat.label()),
             Style::default()
@@ -378,7 +408,6 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(NEON_YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
         Span::styled(
             format!(" Shuffle: {} ", if app.shuffle { "On" } else { "Off" }),
             Style::default()
@@ -389,7 +418,6 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     ];
     if app.video.is_some() {
         let mode = if app.auto_av_offset { "auto" } else { "manual" };
-        badges.push(Span::raw("  "));
         badges.push(Span::styled(
             format!(
                 " A/V: {:+.0} ms ({}) ",
@@ -402,7 +430,10 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(badges)), inner_layout[4]);
+    frame.render_widget(
+        Paragraph::new(layout_badges(badges, inner_layout[4].width as usize)),
+        inner_layout[4],
+    );
 
     draw_volume_column(frame, cols[1], app.player.volume());
 }
