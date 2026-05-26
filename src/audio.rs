@@ -203,6 +203,9 @@ pub struct FfmpegAudioSource {
 impl FfmpegAudioSource {
     pub fn open(path: &Path) -> Result<Self> {
         ffmpeg::init().ok();
+        // Mute libav warnings ("Could not update timestamps for skipped
+        // samples", etc.) — they corrupt the TUI when written to stderr.
+        ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Fatal);
         let ictx = ffmpeg::format::input(&path.to_path_buf())
             .with_context(|| format!("opening {}", path.display()))?;
         let stream = ictx
@@ -434,8 +437,12 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new() -> Result<Self> {
-        let sink = DeviceSinkBuilder::open_default_sink()
+        let mut sink = DeviceSinkBuilder::open_default_sink()
             .context("failed to open default audio output")?;
+        // We intentionally drop the sink on quit; suppress rodio's "audio
+        // playing through this sink will stop" log so it doesn't print into
+        // the user's shell after the TUI tears down.
+        sink.log_on_drop(false);
         let player = Player::connect_new(sink.mixer());
         let tap = SampleBuffer::new();
         Ok(Self {

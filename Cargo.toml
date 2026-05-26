@@ -1,8 +1,8 @@
 [package]
 name = "sparkplayer"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-description = "A vibrant terminal music player built with ratatui"
+description = "A fun, no-nonsense terminal media player built with ratatui"
 authors = ["dividebysandwich"]
 license = "GPL-2.0-only"
 repository = "https://github.com/dividebysandwich/sparkplayer"

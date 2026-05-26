@@ -48,6 +48,8 @@ const MAX_QUEUED_FRAMES: usize = 12;
 impl VideoStream {
     pub fn open(path: &Path) -> Result<Self> {
         ffmpeg::init().ok();
+        // Mute libav warnings — they corrupt the TUI when written to stderr.
+        ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Fatal);
         let ictx = ffmpeg::format::input(&path.to_path_buf())
             .with_context(|| format!("opening video {}", path.display()))?;
         let stream = ictx
