@@ -4,9 +4,9 @@ A fun, no-nonsense terminal based media player using Ratatui
 
 <img width="1501" height="932" alt="image" src="https://github.com/user-attachments/assets/6f7388cb-c2fb-4b06-8d11-93f82e916906" />
 
-<img width="1992" height="1298" alt="image" src="https://github.com/user-attachments/assets/64343b32-d799-44da-b27c-15384851166d" />
+<img width="992" height="1098" alt="demo-opt" src="https://github.com/user-attachments/assets/c3556b58-68e4-4173-a506-bc51b7a908de" />
 
-<img width="1984" height="1441" alt="image" src="https://github.com/user-attachments/assets/97d8cb78-2500-40e2-b479-d4b2ac4f021f" />
+<img width="1992" height="1298" alt="image" src="https://github.com/user-attachments/assets/64343b32-d799-44da-b27c-15384851166d" />
 
 # Installation
 
