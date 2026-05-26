@@ -145,7 +145,7 @@ impl App {
     pub fn init_graphics(&mut self) {
         let mut picker = Picker::from_query_stdio()
             .ok()
-            .unwrap_or_else(|| Picker::from_fontsize((8, 16)));
+            .unwrap_or_else(Picker::halfblocks);
         if let Some(forced) = self.graphics_choice.into_protocol() {
             picker.set_protocol_type(forced);
         }

@@ -42,7 +42,7 @@ pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
         meta.title = tag.title().map(|s| s.to_string());
         meta.artist = tag.artist().map(|s| s.to_string());
         meta.album = tag.album().map(|s| s.to_string());
-        meta.year = tag.year();
+        meta.year = tag.date().map(|d| d.year as u32);
         meta.track_no = tag.track();
     }
 

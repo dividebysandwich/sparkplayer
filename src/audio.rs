@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::source::Source;
+use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate};
 
 const TAP_CAPACITY: usize = 8192;
 
@@ -54,10 +55,10 @@ impl SampleBuffer {
         }
     }
 
-    fn set_format(&self, channels: u16, sample_rate: u32) {
+    fn set_format(&self, channels: ChannelCount, sample_rate: SampleRate) {
         if let Ok(mut g) = self.inner.lock() {
-            g.channels = channels;
-            g.sample_rate = sample_rate;
+            g.channels = channels.get();
+            g.sample_rate = sample_rate.get();
         }
     }
 
@@ -205,13 +206,13 @@ impl<S> Source for TapSource<S>
 where
     S: Source<Item = f32>,
 {
-    fn current_frame_len(&self) -> Option<usize> {
-        self.inner.current_frame_len()
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
     }
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> ChannelCount {
         self.inner.channels()
     }
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> SampleRate {
         self.inner.sample_rate()
     }
     fn total_duration(&self) -> Option<Duration> {
@@ -220,9 +221,8 @@ where
 }
 
 pub struct AudioPlayer {
-    _stream: OutputStream,
-    handle: OutputStreamHandle,
-    sink: Sink,
+    sink: MixerDeviceSink,
+    player: Player,
     pub tap: SampleBuffer,
     volume: f32,
     pub current_path: Option<PathBuf>,
@@ -230,14 +230,13 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new() -> Result<Self> {
-        let (stream, handle) =
-            OutputStream::try_default().context("failed to open default audio output")?;
-        let sink = Sink::try_new(&handle).context("failed to create audio sink")?;
+        let sink = DeviceSinkBuilder::open_default_sink()
+            .context("failed to open default audio output")?;
+        let player = Player::connect_new(sink.mixer());
         let tap = SampleBuffer::new();
         Ok(Self {
-            _stream: stream,
-            handle,
             sink,
+            player,
             tap,
             volume: 0.8,
             current_path: None,
@@ -245,21 +244,19 @@ impl AudioPlayer {
     }
 
     pub fn play_file(&mut self, path: &Path) -> Result<Option<Duration>> {
-        self.sink.stop();
-        self.sink =
-            Sink::try_new(&self.handle).context("failed to create sink for new track")?;
-        self.sink.set_volume(self.volume);
+        self.player.stop();
+        self.player = Player::connect_new(self.sink.mixer());
+        self.player.set_volume(self.volume);
         self.tap.reset();
         self.current_path = Some(path.to_path_buf());
 
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let decoder = Decoder::new(BufReader::new(file))
+        let source = Decoder::new(BufReader::new(file))
             .with_context(|| format!("decoding {}", path.display()))?;
-        let source = decoder.convert_samples::<f32>();
         let total = source.total_duration();
         let tapped = TapSource::new(source, self.tap.clone());
-        self.sink.append(tapped);
-        self.sink.play();
+        self.player.append(tapped);
+        self.player.play();
         Ok(total)
     }
 
@@ -280,55 +277,53 @@ impl AudioPlayer {
     }
 
     fn seek_to(&mut self, path: &Path, target: Duration) -> Result<()> {
-        let was_paused = self.sink.is_paused();
-        self.sink.stop();
-        self.sink =
-            Sink::try_new(&self.handle).context("failed to create sink for seek")?;
-        self.sink.set_volume(self.volume);
+        let was_paused = self.player.is_paused();
+        self.player.stop();
+        self.player = Player::connect_new(self.sink.mixer());
+        self.player.set_volume(self.volume);
 
         let file = File::open(path)?;
-        let decoder = Decoder::new(BufReader::new(file))?;
-        let source = decoder.convert_samples::<f32>();
+        let source = Decoder::new(BufReader::new(file))?;
         let skipped = source.skip_duration(target);
 
         self.tap.reset();
         self.tap.set_base_offset(target);
         let tapped = TapSource::new(skipped, self.tap.clone());
-        self.sink.append(tapped);
+        self.player.append(tapped);
 
         if was_paused {
-            self.sink.pause();
+            self.player.pause();
         } else {
-            self.sink.play();
+            self.player.play();
         }
         Ok(())
     }
 
     pub fn toggle_pause(&self) {
-        if self.sink.is_paused() {
-            self.sink.play();
+        if self.player.is_paused() {
+            self.player.play();
         } else {
-            self.sink.pause();
+            self.player.pause();
         }
     }
 
     pub fn is_paused(&self) -> bool {
-        self.sink.is_paused()
+        self.player.is_paused()
     }
 
     pub fn is_finished(&self) -> bool {
-        self.sink.empty()
+        self.player.empty()
     }
 
     #[allow(dead_code)]
     pub fn stop(&mut self) {
-        self.sink.stop();
+        self.player.stop();
         self.tap.reset();
     }
 
     pub fn set_volume(&mut self, v: f32) {
         self.volume = v.clamp(0.0, 1.5);
-        self.sink.set_volume(self.volume);
+        self.player.set_volume(self.volume);
     }
 
     pub fn volume(&self) -> f32 {

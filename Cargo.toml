@@ -1,6 +1,6 @@
 [package]
 name = "sparkplayer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A vibrant terminal music player built with ratatui"
 authors = ["dividebysandwich"]
@@ -13,17 +13,17 @@ name = "sparkplayer"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-rodio = { version = "0.17", default-features = false, features = ["symphonia-all"] }
-symphonia = { version = "0.5", features = ["all"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+rodio = { version = "0.22", default-features = false, features = ["playback", "symphonia-all"] }
+symphonia = { version = "0.6", features = ["all"] }
 rustfft = "6.2"
-dirs = "5.0"
+dirs = "6.0"
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
-lofty = "0.22"
+lofty = "0.24"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-ratatui-image = "4"
+ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
 walkdir = "2"
 
 [profile.release]

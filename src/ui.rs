@@ -510,11 +510,13 @@ fn draw_album_art(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     // Read the terminal's actual cell pixel size from the picker so we can
     // fit any image aspect ratio correctly, not just square covers.
-    let (font_w, font_h) = app
+    let font_size = app
         .picker
         .as_ref()
         .map(|p| p.font_size())
-        .unwrap_or((8, 16));
+        .unwrap_or(ratatui_image::FontSize::new(8, 16));
+    let font_w = font_size.width;
+    let font_h = font_size.height;
     let dims = app.album_dims;
 
     let Some(proto) = app.album_protocol.as_mut() else {
