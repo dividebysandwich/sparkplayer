@@ -128,6 +128,8 @@ pub struct App {
     pub subtitles: SubtitleSet,
     pub active_subtitle_track: Option<usize>,
     pub current_subtitle_text: Option<String>,
+    pub subtitle_announcement_until: Option<Instant>,
+    last_subtitle_track_count: usize,
 
     pub should_quit: bool,
     pub show_help: bool,
@@ -181,6 +183,8 @@ impl App {
             subtitles: SubtitleSet::default(),
             active_subtitle_track: None,
             current_subtitle_text: None,
+            subtitle_announcement_until: None,
+            last_subtitle_track_count: 0,
             should_quit: false,
             show_help: false,
             fullscreen_vis: false,
@@ -373,9 +377,12 @@ impl App {
         self.video = None;
         self.video_protocol = None;
         self.video_dims = None;
+        self.subtitles.cancel();
         self.subtitles = SubtitleSet::default();
         self.active_subtitle_track = None;
         self.current_subtitle_text = None;
+        self.subtitle_announcement_until = None;
+        self.last_subtitle_track_count = 0;
 
         match self.player.play_file(&path) {
             Ok(dur_hint) => {
@@ -429,7 +436,14 @@ impl App {
         }
         self.current_subtitle_text = self
             .active_subtitle_track
-            .and_then(|i| self.subtitles.cue_at(i, pos).map(str::to_owned));
+            .and_then(|i| self.subtitles.cue_at(i, pos));
+        let count = self.subtitles.track_count();
+        if count > self.last_subtitle_track_count && self.last_subtitle_track_count == 0 {
+            // First subtitle track(s) for this video just became available —
+            // briefly announce them under the video.
+            self.subtitle_announcement_until = Some(Instant::now() + Duration::from_secs(5));
+        }
+        self.last_subtitle_track_count = count;
         let Some(frame) = video.frame_at(pos) else {
             return;
         };
@@ -630,22 +644,52 @@ impl App {
         }
     }
 
+    /// Text to show under the video for ~5s after subtitles first become
+    /// available, listing the tracks and the hotkey. Returns None once the
+    /// window expires or no tracks are loaded.
+    pub fn subtitle_announcement(&self) -> Option<String> {
+        let deadline = self.subtitle_announcement_until?;
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let count = self.subtitles.track_count();
+        if count == 0 {
+            return None;
+        }
+        let labels: Vec<String> = (0..count)
+            .filter_map(|i| self.subtitles.track_label(i))
+            .collect();
+        if labels.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Subtitles available: {} — press 'c' to cycle",
+            labels.join(", ")
+        ))
+    }
+
     pub fn cycle_subtitle_track(&mut self) {
-        if self.subtitles.tracks.is_empty() {
+        let count = self.subtitles.track_count();
+        if count == 0 {
             self.active_subtitle_track = None;
             self.current_subtitle_text = None;
-            self.status = String::from("No subtitles available");
+            self.status = String::from("No subtitles available (still loading?)");
             return;
         }
         let next = match self.active_subtitle_track {
             None => Some(0),
-            Some(i) if i + 1 < self.subtitles.tracks.len() => Some(i + 1),
+            Some(i) if i + 1 < count => Some(i + 1),
             Some(_) => None,
         };
         self.active_subtitle_track = next;
         self.current_subtitle_text = None;
         self.status = match next {
-            Some(i) => format!("Subtitles: {}", self.subtitles.tracks[i].label),
+            Some(i) => format!(
+                "Subtitles: {}",
+                self.subtitles
+                    .track_label(i)
+                    .unwrap_or_else(|| format!("Track {}", i + 1))
+            ),
             None => String::from("Subtitles: off"),
         };
     }

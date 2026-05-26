@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::Id;
@@ -19,14 +22,35 @@ pub struct SubtitleTrack {
     pub cues: Vec<SubtitleCue>,
 }
 
+#[derive(Debug, Default)]
+struct SubtitleInner {
+    tracks: Mutex<Vec<SubtitleTrack>>,
+    cancelled: AtomicBool,
+}
+
+/// Thread-safe handle to a (possibly still-loading) set of subtitle tracks.
+/// Sidecar tracks are populated synchronously in `load_for_video`; embedded
+/// tracks are extracted on a background thread and appended as the loader
+/// finishes — the UI can query whatever is available at any moment without
+/// blocking video playback.
 #[derive(Debug, Default, Clone)]
 pub struct SubtitleSet {
-    pub tracks: Vec<SubtitleTrack>,
+    inner: Arc<SubtitleInner>,
 }
 
 impl SubtitleSet {
-    pub fn cue_at(&self, track_idx: usize, secs: f64) -> Option<&str> {
-        let track = self.tracks.get(track_idx)?;
+    pub fn track_count(&self) -> usize {
+        self.inner.tracks.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    pub fn track_label(&self, idx: usize) -> Option<String> {
+        let guard = self.inner.tracks.lock().ok()?;
+        guard.get(idx).map(|t| t.label.clone())
+    }
+
+    pub fn cue_at(&self, track_idx: usize, secs: f64) -> Option<String> {
+        let guard = self.inner.tracks.lock().ok()?;
+        let track = guard.get(track_idx)?;
         if track.cues.is_empty() {
             return None;
         }
@@ -38,22 +62,55 @@ impl SubtitleSet {
         }
         let cue = &track.cues[i - 1];
         if cue.end_secs >= secs {
-            Some(&cue.text)
+            Some(cue.text.clone())
         } else {
             None
         }
     }
+
+    /// Signal the background loader (if any) to stop as soon as it can.
+    pub fn cancel(&self) {
+        self.inner.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 pub fn load_for_video(video_path: &Path) -> SubtitleSet {
-    let mut tracks = extract_embedded(video_path).unwrap_or_default();
-    tracks.extend(discover_sidecars(video_path));
-    // Drop tracks that produced no cues.
-    tracks.retain(|t| !t.cues.is_empty());
-    SubtitleSet { tracks }
+    let set = SubtitleSet::default();
+    // Sidecar parsing is fast (a directory scan plus small file reads), so
+    // surface those tracks synchronously and they will be available the moment
+    // playback starts.
+    let sidecars = discover_sidecars(video_path);
+    if !sidecars.is_empty() {
+        if let Ok(mut guard) = set.inner.tracks.lock() {
+            guard.extend(sidecars.into_iter().filter(|t| !t.cues.is_empty()));
+        }
+    }
+
+    // Embedded extraction can read a lot of the container — punt to a
+    // background thread so audio/video playback isn't held up.
+    let path = video_path.to_path_buf();
+    let inner = Arc::clone(&set.inner);
+    let _ = thread::Builder::new()
+        .name("sparkplayer-subs".into())
+        .spawn(move || {
+            if inner.cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            let tracks = extract_embedded(&path, &inner.cancelled).unwrap_or_default();
+            if inner.cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            if !tracks.is_empty() {
+                if let Ok(mut guard) = inner.tracks.lock() {
+                    guard.extend(tracks.into_iter().filter(|t| !t.cues.is_empty()));
+                }
+            }
+        });
+
+    set
 }
 
-fn extract_embedded(video_path: &Path) -> Option<Vec<SubtitleTrack>> {
+fn extract_embedded(video_path: &Path, cancelled: &AtomicBool) -> Option<Vec<SubtitleTrack>> {
     ffmpeg::init().ok();
     let mut ictx = ffmpeg::format::input(&video_path.to_path_buf()).ok()?;
 
@@ -107,7 +164,26 @@ fn extract_embedded(video_path: &Path) -> Option<Vec<SubtitleTrack>> {
         return Some(Vec::new());
     }
 
+    // Tell ffmpeg to drop everything that isn't one of our subtitle streams
+    // before it ever reaches us. Without this, `packets()` reads the entire
+    // multi-gigabyte container (every video and audio packet) just to find
+    // subtitle packets, which can take many seconds on large MKVs.
+    let kept: std::collections::HashSet<usize> = pendings.iter().map(|p| p.index).collect();
+    let stream_count = ictx.nb_streams() as usize;
+    for i in 0..stream_count {
+        if let Some(mut sm) = ictx.stream_mut(i) {
+            if !kept.contains(&i) {
+                unsafe {
+                    (*sm.as_mut_ptr()).discard = ffmpeg::ffi::AVDiscard::AVDISCARD_ALL;
+                }
+            }
+        }
+    }
+
     for (stream, packet) in ictx.packets() {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         let idx = stream.index();
         let Some(pending) = pendings.iter_mut().find(|p| p.index == idx) else {
             continue;
@@ -457,20 +533,19 @@ mod tests {
 
     #[test]
     fn cue_at_binary_search() {
-        let set = SubtitleSet {
-            tracks: vec![SubtitleTrack {
-                label: "t".into(),
-                language: None,
-                cues: vec![
-                    SubtitleCue { start_secs: 1.0, end_secs: 2.0, text: "a".into() },
-                    SubtitleCue { start_secs: 3.0, end_secs: 4.0, text: "b".into() },
-                ],
-            }],
-        };
+        let set = SubtitleSet::default();
+        set.inner.tracks.lock().unwrap().push(SubtitleTrack {
+            label: "t".into(),
+            language: None,
+            cues: vec![
+                SubtitleCue { start_secs: 1.0, end_secs: 2.0, text: "a".into() },
+                SubtitleCue { start_secs: 3.0, end_secs: 4.0, text: "b".into() },
+            ],
+        });
         assert_eq!(set.cue_at(0, 0.5), None);
-        assert_eq!(set.cue_at(0, 1.5), Some("a"));
+        assert_eq!(set.cue_at(0, 1.5).as_deref(), Some("a"));
         assert_eq!(set.cue_at(0, 2.5), None);
-        assert_eq!(set.cue_at(0, 3.5), Some("b"));
+        assert_eq!(set.cue_at(0, 3.5).as_deref(), Some("b"));
     }
 
     #[test]

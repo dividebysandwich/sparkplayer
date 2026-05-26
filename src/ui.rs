@@ -429,6 +429,22 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(NEON_CYAN)
                 .add_modifier(Modifier::BOLD),
         ));
+        if app.subtitles.track_count() > 0 {
+            let sub_state = match app.active_subtitle_track {
+                Some(i) => app
+                    .subtitles
+                    .track_label(i)
+                    .unwrap_or_else(|| format!("Track {}", i + 1)),
+                None => "Off".to_string(),
+            };
+            badges.push(Span::styled(
+                format!(" Subs: {} ", sub_state),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(NEON_PURPLE)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     frame.render_widget(
         Paragraph::new(layout_badges(badges, inner_layout[4].width as usize)),
@@ -637,8 +653,10 @@ fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
     // The strip is sized for the maximum cue height (2 lines); empty rows are
     // simply left blank between cues.
     const SUB_STRIP_ROWS: u16 = 2;
-    let subs_active = app.active_subtitle_track.is_some() && !app.subtitles.tracks.is_empty();
-    let (video_area, sub_area) = if subs_active && inner.height > SUB_STRIP_ROWS + 1 {
+    let announcement = app.subtitle_announcement();
+    let subs_active = app.active_subtitle_track.is_some() && app.subtitles.track_count() > 0;
+    let need_strip = subs_active || announcement.is_some();
+    let (video_area, sub_area) = if need_strip && inner.height > SUB_STRIP_ROWS + 1 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(SUB_STRIP_ROWS)])
@@ -647,7 +665,12 @@ fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         (inner, None)
     };
-    let sub_lines: Vec<String> = match (sub_area, app.current_subtitle_text.as_deref()) {
+    // Prefer a real cue over the announcement when both are present.
+    let strip_text: Option<String> = app
+        .current_subtitle_text
+        .clone()
+        .or(announcement);
+    let sub_lines: Vec<String> = match (sub_area, strip_text.as_deref()) {
         (Some(area), Some(text)) => wrap_subtitle(text, area.width as usize, SUB_STRIP_ROWS as usize),
         _ => Vec::new(),
     };
