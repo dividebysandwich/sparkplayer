@@ -1974,37 +1974,40 @@ fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
     };
     let lbl = |s: &str| Span::styled(format!(" {s}  "), Style::default().fg(DIM_TEXT));
 
-    let controls = Line::from(vec![
-        key("Space"),
-        lbl("Play/Pause"),
-        key("n"),
-        lbl("Next"),
-        key("p"),
-        lbl("Prev"),
-        key("v"),
-        lbl("Visualizer"),
-        key("f"),
-        lbl("Fullscreen"),
-        key("r"),
-        lbl("Repeat"),
-        key("s"),
-        lbl("Shuffle"),
-        key("a/A"),
-        lbl("Queue"),
-        key("C"),
-        lbl("Clear"),
-        key("←→"),
-        lbl("Seek 10s"),
-        key("+/-"),
-        lbl("Volume"),
-        key("Tab"),
-        lbl("Focus"),
-        key("?"),
-        lbl("Help"),
-        key("q"),
-        lbl("Quit"),
-    ]);
-    frame.render_widget(Paragraph::new(controls), inner);
+    // Priority-ordered: most important first. We drop entries from the end
+    // when the bar wouldn't fit the available width.
+    let entries: [(&str, &str); 14] = [
+        ("?", "Help"),
+        ("←→", "Seek 10s"),
+        ("Space", "Play/Pause"),
+        ("+/-", "Volume"),
+        ("v", "Visualizer"),
+        ("f", "Fullscreen"),
+        ("n", "Next"),
+        ("p", "Prev"),
+        ("a/A", "Queue"),
+        ("C", "Clear"),
+        ("r", "Repeat"),
+        ("s", "Shuffle"),
+        ("Tab", "Focus"),
+        ("q", "Quit"),
+    ];
+
+    let avail = inner.width as usize;
+    let mut spans: Vec<Span> = Vec::with_capacity(entries.len() * 2);
+    let mut used = 0usize;
+    for (k, l) in entries {
+        // key span is " {k} " → k.chars().count() + 2
+        // lbl span is " {l}  " → l.chars().count() + 3
+        let cost = k.chars().count() + l.chars().count() + 5;
+        if used + cost > avail {
+            break;
+        }
+        spans.push(key(k));
+        spans.push(lbl(l));
+        used += cost;
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
