@@ -539,6 +539,7 @@ fn draw_album_art(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     let mode = app.visualizer.mode;
+    let active = app.playing_index.is_some() && !app.player.is_paused();
     let title = format!(" Visualizer — {} ", mode.label());
     let block = Block::default()
         .borders(Borders::ALL)
@@ -558,20 +559,20 @@ fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     match mode {
-        VisMode::Spectrum => draw_spectrum(frame, inner, app),
-        VisMode::Waveform => draw_waveform(frame, inner, app),
-        VisMode::ScrollingWaveform => draw_scrolling_waveform(frame, inner, app),
-        VisMode::Spectrogram => draw_spectrogram(frame, inner, app),
-        VisMode::Lissajous => draw_lissajous(frame, inner, app),
-        VisMode::Spectrum3D => draw_spectrum_3d(frame, inner, app),
+        VisMode::Spectrum => draw_spectrum(frame, inner, app, active),
+        VisMode::Waveform => draw_waveform(frame, inner, app, active),
+        VisMode::ScrollingWaveform => draw_scrolling_waveform(frame, inner, app, active),
+        VisMode::Spectrogram => draw_spectrogram(frame, inner, app, active),
+        VisMode::Lissajous => draw_lissajous(frame, inner, app, active),
+        VisMode::Spectrum3D => draw_spectrum_3d(frame, inner, app, active),
     }
 }
 
-fn draw_spectrum(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_spectrum(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let bar_width: u16 = 2;
     let bars = (area.width / bar_width).max(1) as usize;
     let sr = app.player.tap.sample_rate();
-    let mags = app.visualizer.spectrum(&app.player.tap, bars, sr);
+    let mags = app.visualizer.spectrum(&app.player.tap, bars, sr, active);
     let h = area.height as usize;
     let buf = frame.buffer_mut();
     for (i, m) in mags.iter().enumerate() {
@@ -643,10 +644,10 @@ fn rgb(c: Color) -> (u8, u8, u8) {
     }
 }
 
-fn draw_waveform(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_waveform(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w = area.width as usize;
     let h = area.height as usize;
-    let points = app.visualizer.waveform(&app.player.tap, w);
+    let points = app.visualizer.waveform(&app.player.tap, w, active);
     draw_amplitude_strip(frame, area, &points, w, h);
 }
 
@@ -686,7 +687,7 @@ fn draw_amplitude_strip(frame: &mut Frame, area: Rect, points: &[f32], w: usize,
 
 /// Scrolling waveform rendered via a Braille-marker Canvas, giving 2× horizontal
 /// and 4× vertical sub-cell precision for much finer peak detail.
-fn draw_scrolling_waveform(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_scrolling_waveform(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w = area.width as usize;
     let h = area.height as usize;
     if w == 0 || h == 0 {
@@ -694,7 +695,7 @@ fn draw_scrolling_waveform(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     // Two columns of braille dots per terminal cell -> oversample by 2.
     let dots = w.saturating_mul(2).max(2);
-    let points = app.visualizer.scrolling_waveform(&app.player.tap, dots);
+    let points = app.visualizer.scrolling_waveform(&app.player.tap, dots, active);
     // Slight headroom so peaks at 1.0 don't clip into the top border.
     let y_max = 1.05f64;
     let canvas = Canvas::default()
@@ -730,14 +731,14 @@ fn draw_scrolling_waveform(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(canvas, area);
 }
 
-fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w = area.width as usize;
     let h = area.height as usize;
     if w == 0 || h == 0 {
         return;
     }
     let sr = app.player.tap.sample_rate();
-    let cols = app.visualizer.spectrogram(&app.player.tap, w, h, sr);
+    let cols = app.visualizer.spectrogram(&app.player.tap, w, h, sr, active);
     let buf = frame.buffer_mut();
     let n_cols = cols.len();
     let start_x = (area.width as usize).saturating_sub(n_cols);
@@ -764,13 +765,13 @@ fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App) {
 /// Stereo X/Y oscillogram (vectorscope). Left channel drives X, right channel
 /// drives Y. Mono signals trace a diagonal; in-phase stereo widens the cloud
 /// vertically, out-of-phase stretches it horizontally.
-fn draw_lissajous(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_lissajous(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w = area.width as usize;
     let h = area.height as usize;
     if w == 0 || h == 0 {
         return;
     }
-    let pts = app.visualizer.lissajous(&app.player.tap, 2048);
+    let pts = app.visualizer.lissajous(&app.player.tap, 2048, active);
     // Keep the plot square in pixel terms: cells are ~2:1, so the X bounds
     // are twice the Y bounds and we letterbox via the Canvas bounds.
     let cell_aspect = 2.0f64;
@@ -852,7 +853,7 @@ fn draw_lissajous(frame: &mut Frame, area: Rect, app: &mut App) {
 /// (newest, near the bottom-left) to back (oldest, up and to the right),
 /// with each silhouette colored by bin amplitude on a blue → yellow → red
 /// ramp and dimmed as it recedes for depth cueing.
-fn draw_spectrum_3d(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_spectrum_3d(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w = area.width as usize;
     let h = area.height as usize;
     if w == 0 || h == 0 {
@@ -864,7 +865,7 @@ fn draw_spectrum_3d(frame: &mut Frame, area: Rect, app: &mut App) {
     // of overlapping silhouettes.
     let depth_rows = (h.saturating_mul(2)).clamp(18, 40);
     let sr = app.player.tap.sample_rate();
-    let rows = app.visualizer.spectrum_3d(&app.player.tap, bins, sr, depth_rows);
+    let rows = app.visualizer.spectrum_3d(&app.player.tap, bins, sr, depth_rows, active);
     if rows.is_empty() {
         return;
     }

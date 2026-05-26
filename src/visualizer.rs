@@ -54,6 +54,8 @@ pub struct Visualizer {
     last_consumed_for_scroll: u64,
     stereo_samples: Vec<(f32, f32)>,
     pub spectrum_3d_rows: VecDeque<Vec<f32>>,
+    last_waveform: Vec<f32>,
+    last_lissajous: Vec<(f32, f32)>,
     pub mode: VisMode,
 }
 
@@ -81,6 +83,8 @@ impl Visualizer {
             last_consumed_for_scroll: 0,
             stereo_samples: Vec::new(),
             spectrum_3d_rows: VecDeque::new(),
+            last_waveform: Vec::new(),
+            last_lissajous: Vec::new(),
             mode: VisMode::Spectrum,
         }
     }
@@ -137,13 +141,22 @@ impl Visualizer {
     }
 
     /// Spectrum bars: smoothed log-binned FFT mapped to 0..1.
-    pub fn spectrum(&mut self, tap: &SampleBuffer, bins: usize, sample_rate: u32) -> Vec<f32> {
-        self.compute_fft(tap);
-        // -75 dB floor, 70 dB range => -5 dB ceiling.
-        let raw = self.log_bin_db(bins, sample_rate, -75.0, 70.0);
+    pub fn spectrum(
+        &mut self,
+        tap: &SampleBuffer,
+        bins: usize,
+        sample_rate: u32,
+        active: bool,
+    ) -> Vec<f32> {
         if self.smoothed_bars.len() != bins {
             self.smoothed_bars = vec![0.0; bins];
         }
+        if !active {
+            return self.smoothed_bars.clone();
+        }
+        self.compute_fft(tap);
+        // -75 dB floor, 70 dB range => -5 dB ceiling.
+        let raw = self.log_bin_db(bins, sample_rate, -75.0, 70.0);
         let attack = 0.55;
         let release = 0.12;
         for i in 0..bins {
@@ -159,7 +172,16 @@ impl Visualizer {
     }
 
     /// Instantaneous waveform: peak-binned absolute amplitudes from the tap.
-    pub fn waveform(&mut self, tap: &SampleBuffer, points: usize) -> Vec<f32> {
+    pub fn waveform(&mut self, tap: &SampleBuffer, points: usize, active: bool) -> Vec<f32> {
+        if !active {
+            if self.last_waveform.len() == points {
+                return self.last_waveform.clone();
+            }
+            let mut out = vec![0.0f32; points];
+            let take = self.last_waveform.len().min(points);
+            out[..take].copy_from_slice(&self.last_waveform[..take]);
+            return out;
+        }
         let n = WAVE_SIZE.min(self.samples.len().max(WAVE_SIZE));
         if self.samples.len() < n {
             self.samples.resize(n, 0.0);
@@ -183,12 +205,35 @@ impl Visualizer {
             }
             out[p] = peak.min(1.0);
         }
+        self.last_waveform = out.clone();
         out
     }
 
     /// Append one new peak column based on samples consumed since last call, and
     /// return a width-sized snapshot of the running history (newest at the right).
-    pub fn scrolling_waveform(&mut self, tap: &SampleBuffer, width: usize) -> Vec<f32> {
+    pub fn scrolling_waveform(
+        &mut self,
+        tap: &SampleBuffer,
+        width: usize,
+        active: bool,
+    ) -> Vec<f32> {
+        if !active {
+            // Keep the scroll cursor in sync so we don't dump a backlog of new
+            // samples into the next column when playback resumes.
+            self.last_consumed_for_scroll = tap.samples_consumed();
+            let cap = width.max(2);
+            while self.scroll_wave.len() > cap {
+                self.scroll_wave.pop_front();
+            }
+            let mut out = vec![0.0f32; width];
+            let start = width.saturating_sub(self.scroll_wave.len());
+            for (i, v) in self.scroll_wave.iter().enumerate() {
+                if start + i < width {
+                    out[start + i] = *v;
+                }
+            }
+            return out;
+        }
         let consumed = tap.samples_consumed();
         let channels = tap.channels().max(1) as u64;
         let new_samples = consumed.saturating_sub(self.last_consumed_for_scroll);
@@ -233,11 +278,14 @@ impl Visualizer {
         width: usize,
         height: usize,
         sample_rate: u32,
+        active: bool,
     ) -> Vec<Vec<f32>> {
-        self.compute_fft(tap);
-        // Slightly tighter dynamic range than the bars so colors saturate nicely.
-        let col = self.log_bin_db(height, sample_rate, -70.0, 65.0);
-        self.spectrogram_cols.push_back(col);
+        if active {
+            self.compute_fft(tap);
+            // Slightly tighter dynamic range than the bars so colors saturate nicely.
+            let col = self.log_bin_db(height, sample_rate, -70.0, 65.0);
+            self.spectrogram_cols.push_back(col);
+        }
         let cap = width.max(2);
         while self.spectrogram_cols.len() > cap {
             self.spectrogram_cols.pop_front();
@@ -247,13 +295,26 @@ impl Visualizer {
 
     /// Latest stereo frames for an X/Y oscillogram. Returns a slice of (L, R)
     /// pairs ready to be plotted on a Lissajous canvas.
-    pub fn lissajous(&mut self, tap: &SampleBuffer, points: usize) -> Vec<(f32, f32)> {
+    pub fn lissajous(
+        &mut self,
+        tap: &SampleBuffer,
+        points: usize,
+        active: bool,
+    ) -> Vec<(f32, f32)> {
+        if !active {
+            if self.last_lissajous.len() <= points {
+                return self.last_lissajous.clone();
+            }
+            return self.last_lissajous[..points].to_vec();
+        }
         if self.stereo_samples.len() < points {
             self.stereo_samples.resize(points, (0.0, 0.0));
         }
         let frames = tap.latest_stereo(&mut self.stereo_samples[..points]);
         let used = frames.min(points);
-        self.stereo_samples[..used].to_vec()
+        let out = self.stereo_samples[..used].to_vec();
+        self.last_lissajous = out.clone();
+        out
     }
 
     /// Append a fresh FFT row to the 3D history and return the visible window.
@@ -264,10 +325,13 @@ impl Visualizer {
         bins: usize,
         sample_rate: u32,
         depth: usize,
+        active: bool,
     ) -> Vec<Vec<f32>> {
-        self.compute_fft(tap);
-        let col = self.log_bin_db(bins, sample_rate, -75.0, 70.0);
-        self.spectrum_3d_rows.push_back(col);
+        if active {
+            self.compute_fft(tap);
+            let col = self.log_bin_db(bins, sample_rate, -75.0, 70.0);
+            self.spectrum_3d_rows.push_back(col);
+        }
         let cap = depth.max(2);
         while self.spectrum_3d_rows.len() > cap {
             self.spectrum_3d_rows.pop_front();
