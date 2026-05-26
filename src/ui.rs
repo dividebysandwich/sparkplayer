@@ -9,7 +9,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, Gauge, List, ListItem, Padding, Paragraph, Wrap,
     canvas::{Canvas, Line as CanvasLine},
 };
-use ratatui_image::StatefulImage;
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, FocusPane};
 use crate::visualizer::VisMode;
@@ -664,7 +664,11 @@ fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
     let x = inner.x + (inner.width - cells_w) / 2;
     let y = inner.y + (inner.height - cells_h) / 2;
     let img_area = Rect::new(x, y, cells_w, cells_h);
-    frame.render_stateful_widget(StatefulImage::default(), img_area, proto);
+    frame.render_stateful_widget(
+        StatefulImage::default().resize(Resize::Scale(None)),
+        img_area,
+        proto,
+    );
 }
 
 fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
