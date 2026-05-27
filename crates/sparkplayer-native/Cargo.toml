@@ -1,0 +1,52 @@
+[package]
+name = "sparkplayer-native"
+description = "A fun, no-nonsense terminal media player built with ratatui."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[[bin]]
+name = "sparkplayer"
+path = "src/main.rs"
+
+[dependencies]
+sparkplayer-core = { path = "../sparkplayer-core" }
+ratatui = { version = "0.30", features = ["crossterm"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+rodio = { version = "0.22", default-features = false, features = ["playback", "symphonia-all"] }
+symphonia = { version = "0.6", features = ["all"] }
+dirs = "6.0"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+lofty = "0.24"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
+walkdir = "2"
+ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
+sdl2 = { version = "0.38", default-features = false }
+ab_glyph = "0.2"
+
+[package.metadata.deb]
+name = "sparkplayer"
+section = "sound"
+priority = "optional"
+depends = "libasound2, libavcodec60 | libavcodec59, libavformat60 | libavformat59, libavutil58 | libavutil57, libswresample4, libswscale7 | libswscale6, libsdl2-2.0-0"
+extended-description = """\
+SparkPlayer is a lightweight terminal media player.
+It supports MP3, WAV, OGG, FLAC, M4A, AAC, Opus and WMA audio plus
+MP4, MKV, AVI, MOV, WebM and M4V video playback (rendered in-terminal
+via Kitty/Sixel/iTerm graphics or halfblocks), M3U/M3U8/PLS playlists,
+embedded album art, and a colorful visualizer with FFT bars, waveform,
+scrolling waveform, spectrogram, stereo X/Y oscillogram, pseudo-3D
+spectrum and a cassette-tape view."""
+assets = [
+    ["target/release/sparkplayer", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/sparkplayer/README.md", "644"],
+]
+
+[package.metadata.wix]
+upgrade-guid = "8E83D6C4-5D8F-4F2E-9A19-1A8E5C2B3E4F"
+path-guid = "4B6A1C2E-9D7F-4E3A-8C5B-6F2D9E1A4B7C"

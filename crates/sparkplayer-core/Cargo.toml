@@ -1,0 +1,20 @@
+[package]
+name = "sparkplayer-core"
+description = "Platform-agnostic core for SparkPlayer: UI, visualizers, app state, and platform traits."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "sparkplayer_core"
+path = "src/lib.rs"
+
+[dependencies]
+# No terminal backend here — the native crate enables ratatui's `crossterm`
+# feature, the web crate gets its backend from ratzilla. Keeping default
+# features off keeps `sparkplayer-core` compilable for wasm32.
+ratatui = { version = "0.30", default-features = false }
+rustfft = "6.2"
+anyhow = "1.0"

@@ -8,7 +8,6 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap};
-use ratatui_image::StatefulImage;
 
 use crate::app::{App, FocusPane};
 
@@ -63,6 +62,9 @@ pub(super) fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 pub(super) fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Record the panel rect so the web build can float the file-picker buttons
+    // over it (the browser pane is empty in the browser).
+    app.last_browser_rect = Some(area);
     let focused = app.focus == FocusPane::Browser;
     let border = if focused { pink() } else { purple() };
     let cwd = app.browser_dir.display().to_string();
@@ -284,9 +286,16 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         fmt_time(dur)
     };
-    draw_progress_bar(frame, inner_layout[2], ratio, &fmt_time(pos), &total);
+    draw_progress_bar(
+        frame,
+        inner_layout[2],
+        ratio,
+        &fmt_time(pos),
+        &total,
+        app.clock_secs as f32,
+    );
 
-    let mode_label = if app.player.is_paused() {
+    let mode_label = if app.audio.is_paused() {
         " ⏸ Paused "
     } else if app.playing_index.is_some() {
         " ▶ Playing "
@@ -316,7 +325,7 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
     ];
-    if app.video.is_some() {
+    if app.video.is_loaded() {
         let mode = if app.auto_av_offset { "auto" } else { "manual" };
         badges.push(Span::styled(
             format!(
@@ -351,7 +360,7 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
         inner_layout[4],
     );
 
-    draw_volume_column(frame, cols[1], app.player.volume());
+    draw_volume_column(frame, cols[1], app.audio.volume());
 }
 
 fn draw_volume_column(frame: &mut Frame, area: Rect, volume: f32) {
@@ -492,44 +501,10 @@ pub(super) fn draw_album_art(frame: &mut Frame, area: Rect, app: &mut App) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    // Read the terminal's actual cell pixel size from the picker so we can
-    // fit any image aspect ratio correctly, not just square covers.
-    let font_size = app
-        .picker
-        .as_ref()
-        .map(|p| p.font_size())
-        .unwrap_or(ratatui_image::FontSize::new(8, 16));
-    let font_w = font_size.width;
-    let font_h = font_size.height;
-    let dims = app.album_dims;
-
-    let Some(proto) = app.album_protocol.as_mut() else {
-        return;
-    };
-    let (iw, ih) = dims.unwrap_or((1, 1));
-    let iw = iw.max(1);
-    let ih = ih.max(1);
-
-    let avail_w_px = inner.width as u32 * font_w.max(1) as u32;
-    let avail_h_px = inner.height as u32 * font_h.max(1) as u32;
-
-    // Scale the image to fit the available panel while preserving aspect.
-    let scale = (avail_w_px as f64 / iw as f64).min(avail_h_px as f64 / ih as f64);
-    let fit_w_px = (iw as f64 * scale).round() as u32;
-    let fit_h_px = (ih as f64 * scale).round() as u32;
-
-    // Round up to whole cells so the image doesn't get truncated at the edges.
-    let cells_w = ((fit_w_px + font_w as u32 - 1) / font_w.max(1) as u32)
-        .max(1)
-        .min(inner.width as u32) as u16;
-    let cells_h = ((fit_h_px + font_h as u32 - 1) / font_h.max(1) as u32)
-        .max(1)
-        .min(inner.height as u32) as u16;
-
-    let x = inner.x + (inner.width - cells_w) / 2;
-    let y = inner.y + (inner.height - cells_h) / 2;
-    let img_area = Rect::new(x, y, cells_w, cells_h);
-    frame.render_stateful_widget(StatefulImage::default(), img_area, proto);
+    // Record the rect for the web `<img>` overlay, then let the backend paint
+    // the art (native: ratatui-image; web: no-op, the overlay floats above).
+    app.last_art_rect = Some(inner);
+    app.art.render(frame, inner);
 }
 
 pub(super) fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
@@ -588,20 +563,13 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
-/// Wall-clock seconds since first call, used purely to drive UI animation.
-/// Independent of playback so the bar shimmers smoothly at the render rate.
-fn anim_time() -> f32 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_secs_f32()
-}
-
 /// Custom playback bar: a solid groove with a bright fill whose hue gently
 /// flows between the theme's primary and accent (a "color wave"), plus a
 /// comet-tail glow trailing the playhead. Sub-cell precision at the fill edge
 /// via left-eighth blocks. The bottom row carries elapsed / percent / total.
-fn draw_progress_bar(frame: &mut Frame, area: Rect, ratio: f64, pos: &str, total: &str) {
+/// `now` is the platform wall-clock (seconds) driving the shimmer animation —
+/// supplied by the caller because `std::time::Instant` is unavailable on wasm.
+fn draw_progress_bar(frame: &mut Frame, area: Rect, ratio: f64, pos: &str, total: &str, now: f32) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -609,7 +577,7 @@ fn draw_progress_bar(frame: &mut Frame, area: Rect, ratio: f64, pos: &str, total
     // Reserve the last row for the time read-out when we have the height for it.
     let bar_rows = if area.height >= 2 { area.height - 1 } else { area.height };
 
-    let t = anim_time();
+    let t = now;
     let track = Color::Rgb(38, 26, 56); // dim groove the fill rides in
 
     // Sub-cell fill: `full` columns are solid, the next column is a partial

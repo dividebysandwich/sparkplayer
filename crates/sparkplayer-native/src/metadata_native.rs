@@ -1,5 +1,7 @@
+//! Filesystem metadata extraction via `lofty`. Produces the platform-agnostic
+//! [`TrackMeta`] consumed by the core UI.
+
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::Result;
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -7,20 +9,7 @@ use lofty::picture::{MimeType, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 
-#[derive(Debug, Default, Clone)]
-pub struct TrackMeta {
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub year: Option<u32>,
-    pub track_no: Option<u32>,
-    pub duration: Option<Duration>,
-    pub sample_rate: Option<u32>,
-    pub channels: Option<u8>,
-    pub bitrate: Option<u32>,
-    pub artwork: Option<Vec<u8>>,
-    pub artwork_mime: Option<String>,
-}
+use sparkplayer_core::metadata::TrackMeta;
 
 pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
     let tagged = Probe::open(path)?.read()?;
@@ -46,10 +35,7 @@ pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
         meta.track_no = tag.track();
     }
 
-    // Sweep every tag for embedded pictures and pick the highest-quality
-    // candidate. Different containers (ID3, MP4 'covr', FLAC PICTURE,
-    // Vorbis METADATA_BLOCK_PICTURE) store artwork in different tags, so a
-    // primary-tag-only check misses real artwork in many files.
+    // Sweep every tag for embedded pictures and pick the highest-quality one.
     let mut best_score = -1i32;
     for tag in tagged.tags() {
         for pic in tag.pictures() {

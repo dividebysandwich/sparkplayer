@@ -1,6 +1,10 @@
 //! Terminal UI rendering. [`draw`] is the per-frame entry point that lays out
 //! the screen and dispatches to the panel, visualizer, video and overlay
-//! submodules.
+//! submodules. Image content (video frames, album art) is drawn through the
+//! `VideoBackend`/`AlbumArtRenderer` trait objects: the native build paints it
+//! into the terminal via ratatui-image, while the web build records the target
+//! rectangle (`App::last_video_rect`/`last_art_rect`) so it can float real
+//! `<video>`/`<img>` elements over the canvas.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -22,9 +26,17 @@ use visualizers::draw_visualizer;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
+    // Reset per-frame overlay rects; the panel renderers set them when (and
+    // where) image content is shown so the web build can position overlays.
+    app.last_video_rect = None;
+    app.last_art_rect = None;
+    app.last_browser_rect = None;
+
+    let has_video = app.video.has_image();
+
     if app.fullscreen_vis {
         // Give the entire screen to the video/visualizer — no footer.
-        if app.video_protocol.is_some() {
+        if has_video {
             draw_video(frame, area, app);
         } else {
             draw_visualizer(frame, area, app);
@@ -56,11 +68,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_playlist(frame, left[0], app);
     draw_browser(frame, left[1], app);
 
-    let has_video = app.video_protocol.is_some();
-
     if has_video {
-        // Video gets the larger half of the right column; metadata + visualizer
-        // share the bottom.
         let right = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Length(16)])
@@ -78,7 +86,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .constraints([Constraint::Length(16), Constraint::Min(8)])
             .split(body[1]);
 
-        let has_art = app.album_protocol.is_some();
+        let has_art = app.art.has_art();
         if has_art {
             let top_row = Layout::default()
                 .direction(Direction::Horizontal)

@@ -19,7 +19,7 @@ use super::palette::{cyan, pink, yellow};
 /// along the bottom edge. Same rotating-spindle technique as the audio
 /// cassette.
 pub(super) fn draw_vhs(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
-    let phase = app.visualizer.cassette_phase(&app.player.tap, active);
+    let phase = app.visualizer.cassette_phase(app.audio.tap(), active);
     let title = app
         .current_meta
         .title
@@ -420,7 +420,7 @@ pub(super) fn draw_vhs(frame: &mut Frame, area: Rect, app: &mut App, active: boo
 /// while each spindle is a Canvas+Braille widget so the spokes step in
 /// quarter-cell subpixel increments instead of jumping a whole cell at a time.
 pub(super) fn draw_cassette(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
-    let phase = app.visualizer.cassette_phase(&app.player.tap, active);
+    let phase = app.visualizer.cassette_phase(app.audio.tap(), active);
     let title = app
         .current_meta
         .title

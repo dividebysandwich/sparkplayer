@@ -1,42 +1,35 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
-use ratatui_image::picker::{Picker, ProtocolType};
-use ratatui_image::protocol::StatefulProtocol;
 
-use crate::audio::AudioPlayer;
-use crate::config;
-use crate::external_window::ExternalVideoWindow;
-use crate::library::{self, Track};
-use crate::metadata::{self, TrackMeta};
-use crate::subtitles::{self, SubtitleSet};
+use crate::backend::{
+    AlbumArtRenderer, AudioBackend, ConfigStore, CoreKey, CoreKeyEvent, MediaLibrary, VideoBackend,
+};
+use crate::config::Config;
+use crate::library::{self, Track, TrackRef};
+use crate::metadata::TrackMeta;
+use crate::subtitles::SubtitleSet;
 use crate::theme::{self, Theme};
-use crate::video::VideoStream;
 use crate::visualizer::{VisMode, Visualizer};
 
 /// Empirical baseline for the audio path lag (CPAL ring + OS audio server
-/// queue + DAC) on a typical PulseAudio/PipeWire setup. CPAL can only tell us
-/// its own buffer size; the audio server's queue on top is opaque, so we
-/// can't compute the true lag from inside the process. This 20 ms default
-/// matches what the player shipped with before auto-tracking and is the
-/// starting point in auto mode.
+/// queue + DAC) on a typical PulseAudio/PipeWire setup.
 const BASELINE_AV_OFFSET_SECS: f64 = 0.02;
 /// Multiplier applied to the measured CPAL buffer to estimate the *minimum*
-/// plausible audio-path lag for unusually high-latency backends. Only kicks
-/// in if `cpal_buffer × this > BASELINE`.
+/// plausible audio-path lag for unusually high-latency backends.
 const AV_OFFSET_BACKEND_MULT: f64 = 2.0;
-/// Floor on the slewed offset — never let auto-tracking push the video so
-/// far forward that we'd ask for unready frames.
+/// Floor on the slewed offset.
 const MIN_AV_OFFSET_SECS: f64 = 0.050;
-/// Max change per tick when auto-tracking, so the picture doesn't visibly jump.
+/// Max change per tick when auto-tracking.
 const AV_OFFSET_SLEW_PER_TICK: f64 = 0.005;
 pub const AV_OFFSET_STEP_SECS: f64 = 0.025;
 
-/// Target offset before subtracting render time. Uses the empirical 300 ms
-/// baseline, but bumps higher if the negotiated CPAL buffer × backend mult
-/// implies we're on a particularly high-latency audio path.
+/// The project's GitHub page, opened from the escape menu's "GitHub" entry.
+pub const GITHUB_URL: &str = "https://github.com/dividebysandwich/sparkplayer";
+
 fn baseline_av_offset(audio_lat_secs: f64) -> f64 {
     (audio_lat_secs * AV_OFFSET_BACKEND_MULT).max(BASELINE_AV_OFFSET_SECS)
 }
@@ -45,27 +38,6 @@ fn baseline_av_offset(audio_lat_secs: f64) -> f64 {
 pub enum FocusPane {
     Playlist,
     Browser,
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum GraphicsChoice {
-    Auto,
-    Halfblocks,
-    Sixel,
-    Kitty,
-    Iterm,
-}
-
-impl GraphicsChoice {
-    fn into_protocol(self) -> Option<ProtocolType> {
-        match self {
-            GraphicsChoice::Auto => None,
-            GraphicsChoice::Halfblocks => Some(ProtocolType::Halfblocks),
-            GraphicsChoice::Sixel => Some(ProtocolType::Sixel),
-            GraphicsChoice::Kitty => Some(ProtocolType::Kitty),
-            GraphicsChoice::Iterm => Some(ProtocolType::Iterm2),
-        }
-    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -79,6 +51,7 @@ pub enum EscapeMenuKind {
     VideoWindow,
     Repeat,
     Shuffle,
+    Github,
     Separator,
     Quit,
 }
@@ -114,13 +87,22 @@ impl RepeatMode {
     }
 }
 
+/// Central application state. Platform behavior is reached only through the
+/// boxed backend trait objects; everything else (selection, playlist, A/V
+/// arithmetic, escape menu, subtitle bookkeeping) is platform-agnostic and
+/// shared verbatim between the native and web builds.
 pub struct App {
-    pub player: AudioPlayer,
+    pub audio: Box<dyn AudioBackend>,
+    pub video: Box<dyn VideoBackend>,
+    pub library: Box<dyn MediaLibrary>,
+    pub config: Box<dyn ConfigStore>,
+    pub art: Box<dyn AlbumArtRenderer>,
     pub visualizer: Visualizer,
 
     pub tracks: Vec<Track>,
     pub selected: usize,
     pub playing_index: Option<usize>,
+    pub playing_track: Option<TrackRef>,
     pub playlist_state: ListState,
 
     pub browser_dir: PathBuf,
@@ -137,14 +119,8 @@ pub struct App {
     pub repeat: RepeatMode,
     pub shuffle: bool,
 
-    pub picker: Option<Picker>,
-    pub album_protocol: Option<StatefulProtocol>,
-    pub album_dims: Option<(u32, u32)>,
-    pub last_artwork_key: Option<(usize, usize)>,
-
-    pub video: Option<VideoStream>,
-    pub video_protocol: Option<StatefulProtocol>,
-    pub video_dims: Option<(u32, u32)>,
+    // A/V sync (pure arithmetic, shared). On web `advance` returns None so the
+    // offset stays at its baseline and the `<video>` element self-syncs.
     pub av_offset_secs: f64,
     pub audio_output_latency_secs: f64,
     pub video_render_ewma_secs: f64,
@@ -153,12 +129,10 @@ pub struct App {
     pub subtitles: SubtitleSet,
     pub active_subtitle_track: Option<usize>,
     pub current_subtitle_text: Option<String>,
-    pub subtitle_announcement_until: Option<Instant>,
+    /// Deadline (in `clock_secs`) until which the "subtitles available" hint shows.
+    subtitle_announcement_until: Option<f64>,
     last_subtitle_track_count: usize,
     pub preferred_subtitle_lang: Option<String>,
-    /// True once we've satisfied (or failed to satisfy) the CLI subtitle-lang
-    /// request for the currently loaded video. Reset on every play_index so a
-    /// new file gets a fresh shot at the preference.
     preferred_subtitle_applied: bool,
 
     pub should_quit: bool,
@@ -166,24 +140,44 @@ pub struct App {
     pub show_escape_menu: bool,
     pub escape_menu_selected: usize,
     pub fullscreen_vis: bool,
-    pub external_window: Option<ExternalVideoWindow>,
-    pub external_window_enabled: bool,
+
+    /// Whether the platform can open external URLs (web: yes via the browser;
+    /// native: no). Gates the escape menu's "GitHub" entry.
+    pub url_open_supported: bool,
+    /// A URL the platform should open, set when the user activates the GitHub
+    /// entry and drained by the run loop.
+    pending_url_open: Option<String>,
 
     pub theme: Theme,
 
-    graphics_choice: GraphicsChoice,
+    /// Monotonic wall-clock seconds, supplied by the platform each frame. Used
+    /// for UI animation and timed announcements. `std::time::Instant` is
+    /// unavailable on wasm, so time always flows in through here instead.
+    pub clock_secs: f64,
+
+    /// Layout rectangles recorded during the last `ui::draw`, used by the web
+    /// build to position the `<video>` / `<img>` overlays and the file-picker
+    /// buttons over the canvas.
+    pub last_video_rect: Option<Rect>,
+    pub last_art_rect: Option<Rect>,
+    pub last_browser_rect: Option<Rect>,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        audio: Box<dyn AudioBackend>,
+        video: Box<dyn VideoBackend>,
+        library: Box<dyn MediaLibrary>,
+        config: Box<dyn ConfigStore>,
+        art: Box<dyn AlbumArtRenderer>,
         initial_tracks: Vec<Track>,
         initial_dir: PathBuf,
-        graphics_choice: GraphicsChoice,
-        cfg: &config::Config,
-    ) -> Result<Self> {
-        let mut player = AudioPlayer::new()?;
-        player.set_volume(cfg.volume);
-        let audio_output_latency_secs = player.output_buffer_latency().as_secs_f64();
+        cfg: &Config,
+    ) -> Self {
+        let mut audio = audio;
+        audio.set_volume(cfg.volume);
+        let audio_output_latency_secs = audio.output_buffer_latency().as_secs_f64();
         let initial_av_offset = baseline_av_offset(audio_output_latency_secs);
         let mut visualizer = Visualizer::new();
         if let Some(mode) = VisMode::from_name(&cfg.visualizer) {
@@ -196,13 +190,18 @@ impl App {
             playlist_state.select(Some(0));
         }
         let mut app = App {
-            player,
+            audio,
+            video,
+            library,
+            config,
+            art,
             visualizer,
             tracks: initial_tracks,
             selected: 0,
             playing_index: None,
+            playing_track: None,
             playlist_state,
-            browser_dir: initial_dir.clone(),
+            browser_dir: initial_dir,
             browser_entries: Vec::new(),
             browser_selected: 0,
             browser_state: ListState::default(),
@@ -212,13 +211,6 @@ impl App {
             status: String::from("Ready"),
             repeat: RepeatMode::Off,
             shuffle: false,
-            picker: None,
-            album_protocol: None,
-            album_dims: None,
-            last_artwork_key: None,
-            video: None,
-            video_protocol: None,
-            video_dims: None,
             av_offset_secs: initial_av_offset,
             audio_output_latency_secs,
             video_render_ewma_secs: 0.0,
@@ -235,59 +227,25 @@ impl App {
             show_escape_menu: false,
             escape_menu_selected: 0,
             fullscreen_vis: false,
-            external_window: None,
-            external_window_enabled: false,
+            url_open_supported: false,
+            pending_url_open: None,
             theme,
-            graphics_choice,
+            clock_secs: 0.0,
+            last_video_rect: None,
+            last_art_rect: None,
+            last_browser_rect: None,
         };
         app.refresh_browser();
-        Ok(app)
+        app
     }
 
-    /// Probe the terminal for graphics capabilities. Must be called after raw
-    /// mode is enabled. Falls back to a fixed font size (halfblock rendering)
-    /// when the terminal doesn't respond to graphics queries.
-    pub fn init_graphics(&mut self) {
-        let mut picker = Picker::from_query_stdio()
-            .ok()
-            .unwrap_or_else(Picker::halfblocks);
-        if let Some(forced) = self.graphics_choice.into_protocol() {
-            picker.set_protocol_type(forced);
-        }
-        self.picker = Some(picker);
-        if self.current_meta.artwork.is_some() {
-            self.last_artwork_key = None;
-            self.refresh_album_art();
-        }
+    /// Advance the platform clock. Called once per frame by the run loop.
+    pub fn set_clock(&mut self, secs: f64) {
+        self.clock_secs = secs;
     }
 
     pub fn refresh_browser(&mut self) {
-        let mut entries: Vec<PathBuf> = Vec::new();
-        if let Some(parent) = self.browser_dir.parent() {
-            entries.push(parent.to_path_buf());
-        }
-        if let Ok(read) = std::fs::read_dir(&self.browser_dir) {
-            let mut dirs = Vec::new();
-            let mut files = Vec::new();
-            for e in read.flatten() {
-                let p = e.path();
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                }
-                if p.is_dir() {
-                    dirs.push(p);
-                } else if library::is_audio_file(&p) || library::is_playlist_file(&p) {
-                    files.push(p);
-                }
-            }
-            dirs.sort();
-            files.sort();
-            entries.extend(dirs);
-            entries.extend(files);
-        }
-        self.browser_entries = entries;
+        self.browser_entries = self.library.browse(&self.browser_dir);
         if self.browser_selected >= self.browser_entries.len() {
             self.browser_selected = self.browser_entries.len().saturating_sub(1);
         }
@@ -376,7 +334,7 @@ impl App {
                         self.browser_selected = 0;
                         self.refresh_browser();
                     } else if library::is_playlist_file(&path) {
-                        match library::load_playlist(&path) {
+                        match self.library.load_playlist(&TrackRef::Path(path.clone())) {
                             Ok(tracks) => {
                                 self.tracks = tracks;
                                 self.selected = 0;
@@ -416,18 +374,15 @@ impl App {
         if idx >= self.tracks.len() {
             return Ok(());
         }
-        let path = self.tracks[idx].path.clone();
-        self.current_meta = metadata::read_metadata(&path).unwrap_or_default();
+        let source = self.tracks[idx].source.clone();
+        self.current_meta = self.library.read_metadata(&source);
         if self.current_meta.artwork.is_none() {
-            if let Some(bytes) = library::find_local_cover(&path) {
+            if let Some(bytes) = self.library.find_cover(&source) {
                 self.current_meta.artwork = Some(bytes);
             }
         }
-        // Tear down any previous video pipeline before swapping audio sources.
-        self.video = None;
-        self.video_protocol = None;
-        self.video_dims = None;
-        self.external_window = None;
+        // Tear down any previous video pipeline / subtitles before swapping.
+        self.video.close();
         self.subtitles.cancel();
         self.subtitles = SubtitleSet::default();
         self.active_subtitle_track = None;
@@ -436,53 +391,38 @@ impl App {
         self.last_subtitle_track_count = 0;
         self.preferred_subtitle_applied = false;
 
-        match self.player.play_file(&path) {
+        match self.audio.play(&source) {
             Ok(dur_hint) => {
                 self.current_duration = self.current_meta.duration.or(dur_hint);
                 self.playing_index = Some(idx);
+                self.playing_track = Some(source.clone());
                 self.selected = idx;
                 self.playlist_state.select(Some(idx));
-                self.status = format!(
-                    "Playing: {}",
-                    self.tracks[idx]
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                );
+                self.status = format!("Playing: {}", self.tracks[idx].display);
                 self.refresh_album_art();
-                if library::is_video_file(&path) {
-                    match VideoStream::open(&path) {
-                        Ok(v) => {
-                            self.video_dims = Some((v.width, v.height));
-                            self.video = Some(v);
-                            if self.external_window_enabled {
-                                self.spawn_external_window();
-                            }
-                        }
-                        Err(e) => {
-                            self.status = format!("Video decode error: {e}");
-                        }
-                    }
-                    self.subtitles = subtitles::load_for_video(&path);
+                if library::is_video(&source) {
+                    self.video.open(&source);
+                    self.subtitles = self.library.load_subtitles(&source);
                 }
             }
             Err(e) => {
                 self.status = format!("Decode error: {e}");
                 self.playing_index = None;
+                self.playing_track = None;
                 self.current_duration = None;
             }
         }
         Ok(())
     }
 
-    /// Pull the latest video frame keyed to the audio output time and refresh
-    /// the on-screen image protocol if a new frame is ready.
+    /// Drive video display: select the current subtitle cue and hand the
+    /// display position to the video backend, then fold the backend's reported
+    /// render time into the auto A/V offset (native only; web returns `None`).
     pub fn tick_video(&mut self) {
-        let Some(video) = self.video.as_ref() else {
+        if !self.video.is_loaded() {
             return;
-        };
-        if self.player.is_paused() {
+        }
+        if self.audio.is_paused() {
             return;
         }
         let pos = self.position().as_secs_f64() - self.av_offset_secs;
@@ -494,19 +434,10 @@ impl App {
             .and_then(|i| self.subtitles.cue_at(i, pos));
         let count = self.subtitles.track_count();
         if count > self.last_subtitle_track_count && self.last_subtitle_track_count == 0 {
-            // First subtitle track(s) for this video just became available —
-            // briefly announce them under the video.
-            self.subtitle_announcement_until = Some(Instant::now() + Duration::from_secs(5));
+            self.subtitle_announcement_until = Some(self.clock_secs + 5.0);
         }
         self.last_subtitle_track_count = count;
-        // Honor a CLI-requested subtitle language: keep trying as embedded
-        // tracks finish extracting in the background. Once a match is found we
-        // flip `preferred_subtitle_applied` so the user can switch tracks
-        // later via `c` without us snapping it back.
-        if !self.preferred_subtitle_applied
-            && self.preferred_subtitle_lang.is_some()
-            && count > 0
-        {
+        if !self.preferred_subtitle_applied && self.preferred_subtitle_lang.is_some() && count > 0 {
             let lang = self.preferred_subtitle_lang.clone().unwrap();
             if let Some(idx) = self.subtitles.find_track_by_language(&lang) {
                 self.active_subtitle_track = Some(idx);
@@ -520,49 +451,22 @@ impl App {
                 self.preferred_subtitle_applied = true;
             }
         }
-        // Drop the external window if it died (close button, init failure).
-        if self.external_window.as_ref().is_some_and(|w| !w.is_alive()) {
-            self.external_window = None;
-            self.external_window_enabled = false;
-        }
-        let Some(frame) = video.frame_at(pos) else {
-            return;
-        };
-        // If the SDL window is up, render there exclusively — the in-terminal
-        // image path is expensive and pointless when the user has the
-        // dedicated playback window in focus.
-        if let Some(window) = self.external_window.as_ref() {
-            self.video_dims = Some((frame.width, frame.height));
-            self.video_protocol = None;
-            window.set_subtitle(self.current_subtitle_text.clone());
-            window.submit_frame(frame);
-            return;
-        }
-        let Some(picker) = self.picker.as_mut() else {
-            return;
-        };
-        let started = Instant::now();
-        let buf = match image::RgbImage::from_raw(frame.width, frame.height, frame.data) {
-            Some(b) => b,
-            None => return,
-        };
-        let dyn_img = image::DynamicImage::ImageRgb8(buf);
-        self.video_dims = Some((frame.width, frame.height));
-        self.video_protocol = Some(picker.new_resize_protocol(dyn_img));
-        let elapsed = started.elapsed().as_secs_f64();
-        // EWMA alpha=0.1: smooths jitter, converges within ~10 ticks (~330 ms).
-        self.video_render_ewma_secs = if self.video_render_ewma_secs == 0.0 {
-            elapsed
-        } else {
-            self.video_render_ewma_secs * 0.9 + elapsed * 0.1
-        };
-        if self.auto_av_offset {
-            let target = (baseline_av_offset(self.audio_output_latency_secs)
-                - self.video_render_ewma_secs)
-                .max(MIN_AV_OFFSET_SECS);
-            let delta = (target - self.av_offset_secs)
-                .clamp(-AV_OFFSET_SLEW_PER_TICK, AV_OFFSET_SLEW_PER_TICK);
-            self.av_offset_secs += delta;
+        let sub = self.current_subtitle_text.clone();
+        let elapsed = self.video.advance(pos, self.audio.is_paused(), sub.as_deref());
+        if let Some(elapsed) = elapsed {
+            self.video_render_ewma_secs = if self.video_render_ewma_secs == 0.0 {
+                elapsed
+            } else {
+                self.video_render_ewma_secs * 0.9 + elapsed * 0.1
+            };
+            if self.auto_av_offset {
+                let target = (baseline_av_offset(self.audio_output_latency_secs)
+                    - self.video_render_ewma_secs)
+                    .max(MIN_AV_OFFSET_SECS);
+                let delta = (target - self.av_offset_secs)
+                    .clamp(-AV_OFFSET_SLEW_PER_TICK, AV_OFFSET_SLEW_PER_TICK);
+                self.av_offset_secs += delta;
+            }
         }
     }
 
@@ -593,7 +497,7 @@ impl App {
     }
 
     pub fn check_advance(&mut self) -> Result<()> {
-        if self.playing_index.is_some() && self.player.is_finished() {
+        if self.playing_index.is_some() && self.audio.is_finished() {
             match self.repeat {
                 RepeatMode::One => {
                     if let Some(i) = self.playing_index {
@@ -607,29 +511,19 @@ impl App {
     }
 
     pub fn seek_seconds(&mut self, delta: f64) {
-        if self.playing_index.is_none() || self.player.current_path.is_none() {
+        if self.playing_index.is_none() || self.playing_track.is_none() {
             return;
         }
         let total = self.current_duration;
-        match self.player.seek_relative(delta, total) {
+        match self.audio.seek_relative(delta, total) {
             Ok(()) => {
-                let pos = self.player.tap.position();
-                if let Some(video) = self.video.as_ref() {
-                    video.seek(pos);
-                }
-                // Drop the render-time EWMA and re-anchor to the baseline:
-                // after seek, the OS audio ring is briefly empty so the
-                // effective lag changes for ~one buffer; slewing from the
-                // pre-seek value would chase a moving target.
+                let pos = self.audio.position();
+                self.video.seek(pos);
                 if self.auto_av_offset {
                     self.av_offset_secs = baseline_av_offset(self.audio_output_latency_secs);
                     self.video_render_ewma_secs = 0.0;
                 }
-                self.status = format!(
-                    "Seek: {} ({:+.0}s)",
-                    fmt_short(pos),
-                    delta
-                );
+                self.status = format!("Seek: {} ({:+.0}s)", fmt_short(pos), delta);
             }
             Err(e) => self.status = format!("Seek error: {e}"),
         }
@@ -651,13 +545,12 @@ impl App {
                 String::from("No audio files in directory")
             };
         } else if library::is_playlist_file(&path) {
-            match library::load_playlist(&path) {
+            match self.library.load_playlist(&TrackRef::Path(path)) {
                 Ok(more) => {
                     let n = more.len();
                     self.tracks.extend(more);
                     self.refresh_playlist_state();
-                    self.status =
-                        format!("Queued playlist ({n} track{})", plural_s(n));
+                    self.status = format!("Queued playlist ({n} track{})", plural_s(n));
                 }
                 Err(e) => self.status = format!("Playlist error: {e}"),
             }
@@ -684,7 +577,7 @@ impl App {
     }
 
     fn queue_directory(&mut self, dir: &Path) -> usize {
-        let new_tracks = library::scan_directory(dir);
+        let new_tracks = self.library.scan_directory(dir);
         let n = new_tracks.len();
         if n > 0 {
             self.tracks.extend(new_tracks);
@@ -704,20 +597,16 @@ impl App {
     }
 
     pub fn clear_playlist(&mut self) {
-        self.player.stop();
+        self.audio.stop();
         self.tracks.clear();
         self.selected = 0;
         self.playing_index = None;
+        self.playing_track = None;
         self.playlist_state.select(None);
         self.current_meta = TrackMeta::default();
         self.current_duration = None;
-        self.album_protocol = None;
-        self.album_dims = None;
-        self.last_artwork_key = None;
-        self.video = None;
-        self.video_protocol = None;
-        self.video_dims = None;
-        self.external_window = None;
+        self.art.set_artwork(None, None);
+        self.video.close();
         self.status = String::from("Playlist cleared");
     }
 
@@ -737,11 +626,10 @@ impl App {
     }
 
     /// Text to show under the video for ~5s after subtitles first become
-    /// available, listing the tracks and the hotkey. Returns None once the
-    /// window expires or no tracks are loaded.
+    /// available. Returns None once the window expires or no tracks are loaded.
     pub fn subtitle_announcement(&self) -> Option<String> {
         let deadline = self.subtitle_announcement_until?;
-        if Instant::now() >= deadline {
+        if self.clock_secs >= deadline {
             return None;
         }
         let count = self.subtitles.track_count();
@@ -791,10 +679,11 @@ impl App {
         if start >= self.tracks.len() {
             return;
         }
-        let mut seed: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(1);
+        // Seed from the platform clock — `SystemTime` is unavailable on wasm.
+        let mut seed: u64 = (self.clock_secs * 1_000_000.0) as u64 ^ 0x9E3779B97F4A7C15;
+        if seed == 0 {
+            seed = 1;
+        }
         let len = self.tracks.len() - start;
         for i in (1..len).rev() {
             seed = seed
@@ -806,51 +695,26 @@ impl App {
     }
 
     fn refresh_album_art(&mut self) {
-        let Some(picker) = self.picker.as_mut() else {
-            self.album_protocol = None;
-            self.album_dims = None;
-            return;
-        };
-        let Some(bytes) = self.current_meta.artwork.as_ref() else {
-            self.album_protocol = None;
-            self.album_dims = None;
-            self.last_artwork_key = None;
-            return;
-        };
-        let key = (bytes.len(), self.playing_index.unwrap_or(usize::MAX));
-        if self.last_artwork_key == Some(key) && self.album_protocol.is_some() {
-            return;
-        }
-        match image::load_from_memory(bytes) {
-            Ok(img) => {
-                self.album_dims = Some((img.width(), img.height()));
-                let proto = picker.new_resize_protocol(img);
-                self.album_protocol = Some(proto);
-                self.last_artwork_key = Some(key);
-            }
-            Err(_) => {
-                self.album_protocol = None;
-                self.album_dims = None;
-                self.last_artwork_key = None;
-            }
-        }
+        let key = self
+            .current_meta
+            .artwork
+            .as_ref()
+            .map(|b| (b.len(), self.playing_index.unwrap_or(usize::MAX)));
+        self.art
+            .set_artwork(self.current_meta.artwork.as_deref(), key);
     }
 
     /// Nudge the A/V sync offset. Positive `delta` pushes the picked video
-    /// frame further into the past (use when video is ahead of audio);
-    /// negative pulls it forward.
+    /// frame further into the past; negative pulls it forward.
     pub fn adjust_av_offset(&mut self, delta: f64) {
         self.av_offset_secs = (self.av_offset_secs + delta).clamp(-0.5, 2.0);
         self.auto_av_offset = false;
-        self.status = format!(
-            "A/V offset: {:+.0} ms (manual)",
-            self.av_offset_secs * 1000.0
-        );
+        self.status = format!("A/V offset: {:+.0} ms (manual)", self.av_offset_secs * 1000.0);
     }
 
     pub fn volume_step(&mut self, delta: f32) {
-        let v = (self.player.volume() + delta).clamp(0.0, 1.5);
-        self.player.set_volume(v);
+        let v = (self.audio.volume() + delta).clamp(0.0, 1.5);
+        self.audio.set_volume(v);
         self.status = format!("Volume: {:>3.0}%", v * 100.0);
         self.save_config();
     }
@@ -883,15 +747,13 @@ impl App {
         self.save_config();
     }
 
-    /// Step the active subtitle track by ±1, including the "Off" slot. Wraps
-    /// at both ends. No-op when no subtitle tracks are loaded.
+    /// Step the active subtitle track by ±1, including the "Off" slot.
     pub fn step_subtitle_track(&mut self, delta: i32) {
         let count = self.subtitles.track_count();
         if count == 0 {
             self.status = String::from("No subtitles available (still loading?)");
             return;
         }
-        // Slots: 0..count = tracks, count = Off.
         let total = (count + 1) as i32;
         let current = self
             .active_subtitle_track
@@ -926,91 +788,60 @@ impl App {
         self.fullscreen_vis = !self.fullscreen_vis;
     }
 
-    /// Cycle the display mode: Normal → in-terminal Fullscreen → external
-    /// Video Window → Normal. Bound to `f`.
+    /// Cycle the display mode: Normal → in-app Fullscreen → external Video
+    /// Window → Normal. The external-window step is a no-op where the video
+    /// backend doesn't support one (web), so it collapses to Normal↔Fullscreen.
     pub fn cycle_display_mode(&mut self) {
-        if self.external_window_enabled {
-            // Video Window → Normal
-            self.external_window_enabled = false;
-            self.external_window = None;
+        if self.video.external_window_enabled() {
+            self.video.set_external_window(false);
             self.fullscreen_vis = false;
             self.status = String::from("Display: normal");
         } else if self.fullscreen_vis {
-            // Fullscreen → Video Window
             self.fullscreen_vis = false;
-            self.external_window_enabled = true;
-            if self.video.is_some() {
-                self.spawn_external_window();
+            if self.video.supports_external_window() {
+                self.video.set_external_window(true);
+                self.status = if self.video.is_loaded() {
+                    String::from("Display: video window")
+                } else {
+                    String::from("Display: video window (armed — opens on next video)")
+                };
             } else {
-                self.status = String::from(
-                    "Display: video window (armed — opens on next video)",
-                );
+                self.status = String::from("Display: normal");
             }
         } else {
-            // Normal → Fullscreen
             self.fullscreen_vis = true;
             self.status = String::from("Display: fullscreen");
         }
     }
 
-    /// Open a dedicated SDL window for fullscreen video playback. No-op if the
-    /// window is already up or no video is loaded.
-    fn spawn_external_window(&mut self) {
-        if self.external_window.is_some() || self.video.is_none() {
+    /// Flip the dedicated-window option from the escape menu.
+    pub fn toggle_video_window(&mut self) {
+        if !self.video.supports_external_window() {
             return;
         }
-        match ExternalVideoWindow::spawn() {
-            Ok(w) => {
-                self.external_window = Some(w);
-                // Stop rendering the terminal video tile — frames go to SDL now.
-                self.video_protocol = None;
-                self.status = String::from("Video window: opened");
-            }
-            Err(e) => {
-                self.external_window_enabled = false;
-                self.status = format!("Video window error: {e}");
-            }
-        }
-    }
-
-    /// Flip the dedicated-window option from the escape menu. Spawning happens
-    /// immediately if a video is loaded; otherwise the flag persists and the
-    /// window opens the next time a video starts.
-    pub fn toggle_video_window(&mut self) {
-        self.external_window_enabled = !self.external_window_enabled;
-        if self.external_window_enabled {
-            if self.video.is_some() {
-                self.spawn_external_window();
+        let on = !self.video.external_window_enabled();
+        self.video.set_external_window(on);
+        self.status = if on {
+            if self.video.is_loaded() {
+                String::from("Video window: opened")
             } else {
-                self.status = String::from(
-                    "Video window: armed — opens when next video plays",
-                );
+                String::from("Video window: armed — opens when next video plays")
             }
         } else {
-            self.external_window = None;
-            self.status = String::from("Video window: closed");
-        }
-    }
-
-    /// Drain queued keyboard events from the external playback window so the
-    /// main run loop can dispatch them through the regular handler. Returns
-    /// pairs of `(KeyCode, KeyModifiers)`.
-    pub fn drain_external_keys(&self) -> Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
-        let Some(window) = self.external_window.as_ref() else {
-            return Vec::new();
+            String::from("Video window: closed")
         };
-        window
-            .drain_keys()
-            .into_iter()
-            .map(|k| (k.code, k.mods))
-            .collect()
     }
 
-    /// Build the list of menu rows. Rows whose preconditions aren't met (e.g.
-    /// subtitles when no video is playing) are returned with `enabled = false`
-    /// so the renderer dims them and the key handler skips over them.
+    /// Drain keys forwarded from the external playback window (native only).
+    pub fn drain_external_keys(&self) -> Vec<CoreKeyEvent> {
+        self.video.drain_external_keys()
+    }
+
+    /// Build the escape-menu rows. Rows whose preconditions aren't met are
+    /// returned `enabled = false` so the renderer dims them and the key handler
+    /// skips over them.
     pub fn escape_menu_items(&self) -> Vec<EscapeMenuItem> {
-        let has_video = self.video.is_some();
+        let has_video = self.video.is_loaded();
         let sub_label = if !has_video {
             "—".to_string()
         } else if self.subtitles.track_count() == 0 {
@@ -1031,12 +862,12 @@ impl App {
         } else {
             format!("{:+.0} ms", self.av_offset_secs * 1000.0)
         };
-        vec![
+        let mut items = vec![
             EscapeMenuItem {
                 kind: EscapeMenuKind::Volume,
                 enabled: true,
                 label: "Volume",
-                value: format!("{:>3.0}%", self.player.volume() * 100.0),
+                value: format!("{:>3.0}%", self.audio.volume() * 100.0),
             },
             EscapeMenuItem {
                 kind: EscapeMenuKind::Subtitle,
@@ -1070,10 +901,14 @@ impl App {
             },
             EscapeMenuItem {
                 kind: EscapeMenuKind::VideoWindow,
-                enabled: true,
+                enabled: self.video.supports_external_window(),
                 label: "Video Window",
-                value: if self.external_window_enabled { "On" } else { "Off" }
-                    .to_string(),
+                value: if self.video.external_window_enabled() {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_string(),
             },
             EscapeMenuItem {
                 kind: EscapeMenuKind::Repeat,
@@ -1087,19 +922,28 @@ impl App {
                 label: "Shuffle",
                 value: if self.shuffle { "On" } else { "Off" }.to_string(),
             },
-            EscapeMenuItem {
-                kind: EscapeMenuKind::Separator,
-                enabled: false,
-                label: "",
-                value: String::new(),
-            },
-            EscapeMenuItem {
-                kind: EscapeMenuKind::Quit,
+        ];
+        if self.url_open_supported {
+            items.push(EscapeMenuItem {
+                kind: EscapeMenuKind::Github,
                 enabled: true,
-                label: "Quit",
-                value: String::new(),
-            },
-        ]
+                label: "GitHub",
+                value: "Open ↗".to_string(),
+            });
+        }
+        items.push(EscapeMenuItem {
+            kind: EscapeMenuKind::Separator,
+            enabled: false,
+            label: "",
+            value: String::new(),
+        });
+        items.push(EscapeMenuItem {
+            kind: EscapeMenuKind::Quit,
+            enabled: true,
+            label: "Quit",
+            value: String::new(),
+        });
+        items
     }
 
     fn selectable_indices(&self) -> Vec<usize> {
@@ -1136,8 +980,7 @@ impl App {
         self.escape_menu_selected = selectable[new_pos];
     }
 
-    /// Apply a horizontal adjustment (left/right arrow) to the currently
-    /// highlighted row.
+    /// Apply a horizontal adjustment (left/right arrow) to the highlighted row.
     pub fn escape_menu_adjust(&mut self, delta: i32) -> Result<()> {
         let items = self.escape_menu_items();
         let Some(item) = items.get(self.escape_menu_selected) else {
@@ -1168,13 +1011,13 @@ impl App {
             EscapeMenuKind::VideoWindow => self.toggle_video_window(),
             EscapeMenuKind::Repeat => self.cycle_repeat(),
             EscapeMenuKind::Shuffle => self.toggle_shuffle(),
-            EscapeMenuKind::Quit | EscapeMenuKind::Separator => {}
+            EscapeMenuKind::Github | EscapeMenuKind::Quit | EscapeMenuKind::Separator => {}
         }
         Ok(())
     }
 
-    /// Apply an "activate" (Enter / Space) to the currently highlighted row.
-    /// Returns `true` when the menu should close as a result.
+    /// Apply an "activate" (Enter / Space) to the highlighted row. Returns
+    /// `true` when the menu should close as a result.
     pub fn escape_menu_activate(&mut self) -> Result<bool> {
         let items = self.escape_menu_items();
         let Some(item) = items.get(self.escape_menu_selected) else {
@@ -1188,31 +1031,113 @@ impl App {
                 self.should_quit = true;
                 return Ok(true);
             }
+            EscapeMenuKind::Github => {
+                self.pending_url_open = Some(GITHUB_URL.to_string());
+                return Ok(true);
+            }
             EscapeMenuKind::Fullscreen => self.toggle_fullscreen(),
             EscapeMenuKind::VideoWindow => self.toggle_video_window(),
             EscapeMenuKind::Repeat => self.cycle_repeat(),
             EscapeMenuKind::Shuffle => self.toggle_shuffle(),
-            // For A/V offset, Enter resets to Auto.
             EscapeMenuKind::AvOffset => self.reset_av_offset_auto(),
             _ => {}
         }
         Ok(false)
     }
 
-    /// Persist the user-tunable bits (theme, volume, visualizer) to the
-    /// platform config directory. Errors are swallowed: a write failure on a
-    /// read-only home shouldn't crash the player mid-session.
+    /// Persist the user-tunable bits (theme, volume, visualizer).
     pub fn save_config(&self) {
-        let cfg = config::Config {
+        let cfg = Config {
             theme: self.theme.name.to_string(),
-            volume: self.player.volume(),
+            volume: self.audio.volume(),
             visualizer: self.visualizer.mode.name().to_string(),
         };
-        config::save(&cfg);
+        self.config.save(&cfg);
     }
 
     pub fn position(&self) -> Duration {
-        self.player.tap.position()
+        self.audio.position()
+    }
+
+    /// Take any URL queued for the platform to open (e.g. the GitHub entry).
+    pub fn take_pending_url_open(&mut self) -> Option<String> {
+        self.pending_url_open.take()
+    }
+
+    /// Dispatch a platform-neutral key event. Shared by both builds so the
+    /// keymap stays identical.
+    pub fn handle_key(&mut self, ev: CoreKeyEvent) -> Result<()> {
+        let code = ev.code;
+        let ctrl = ev.ctrl;
+
+        if self.show_help {
+            match code {
+                CoreKey::Esc
+                | CoreKey::Char('?')
+                | CoreKey::Char('h')
+                | CoreKey::Char('q') => self.show_help = false,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.show_escape_menu {
+            if matches!(code, CoreKey::Char('c')) && ctrl {
+                self.should_quit = true;
+                return Ok(());
+            }
+            match code {
+                CoreKey::Esc => self.close_escape_menu(),
+                CoreKey::Up => self.escape_menu_move(-1),
+                CoreKey::Down => self.escape_menu_move(1),
+                CoreKey::Left => self.escape_menu_adjust(-1)?,
+                CoreKey::Right => self.escape_menu_adjust(1)?,
+                CoreKey::Enter | CoreKey::Char(' ') => {
+                    if self.escape_menu_activate()? {
+                        self.close_escape_menu();
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        match code {
+            CoreKey::Char('q') => self.should_quit = true,
+            CoreKey::Esc => self.open_escape_menu(),
+            CoreKey::Char('c') if ctrl => self.should_quit = true,
+            CoreKey::Char(' ') => self.audio.toggle_pause(),
+            CoreKey::Char('n') => self.next_track()?,
+            CoreKey::Char('p') => self.prev_track()?,
+            CoreKey::Char('v') => self.cycle_visualizer(),
+            CoreKey::Char('t') => self.cycle_theme(),
+            CoreKey::Char('f') => self.cycle_display_mode(),
+            CoreKey::Char('r') => self.cycle_repeat(),
+            CoreKey::Char('s') => self.toggle_shuffle(),
+            CoreKey::Char('a') => self.queue_selected_browser(),
+            CoreKey::Char('A') => self.queue_browser_directory(),
+            CoreKey::Char('C') => self.clear_playlist(),
+            CoreKey::Char('c') => self.cycle_subtitle_track(),
+            CoreKey::Char('?') | CoreKey::Char('h') => self.show_help = true,
+            CoreKey::Tab => self.focus_next(),
+            CoreKey::Up => self.move_selection(-1),
+            CoreKey::Down => self.move_selection(1),
+            CoreKey::PageUp => self.page(-1),
+            CoreKey::PageDown => self.page(1),
+            CoreKey::Home => self.select_first(),
+            CoreKey::End => self.select_last(),
+            CoreKey::Left if ctrl => self.seek_seconds(-30.0),
+            CoreKey::Right if ctrl => self.seek_seconds(30.0),
+            CoreKey::Left => self.seek_seconds(-10.0),
+            CoreKey::Right => self.seek_seconds(10.0),
+            CoreKey::Char('-') | CoreKey::Char('_') => self.volume_step(-0.05),
+            CoreKey::Char('+') | CoreKey::Char('=') => self.volume_step(0.05),
+            CoreKey::Char('[') => self.adjust_av_offset(-AV_OFFSET_STEP_SECS),
+            CoreKey::Char(']') => self.adjust_av_offset(AV_OFFSET_STEP_SECS),
+            CoreKey::Enter => self.activate_selection()?,
+            _ => {}
+        }
+        Ok(())
     }
 }
 

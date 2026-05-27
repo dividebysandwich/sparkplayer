@@ -1,0 +1,8 @@
+[build]
+target = "index.html"
+
+[serve]
+port = 8080
+# Serve cross-origin media correctly during local testing. (Hosted media for
+# the manifest must send permissive CORS headers, and the media element loads
+# with crossorigin="anonymous", or the visualizer's analyser reads silence.)

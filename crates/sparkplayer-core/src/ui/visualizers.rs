@@ -21,7 +21,7 @@ use super::palette::{cyan, green, lerp, panel_bg, pink, purple, rgb, yellow};
 
 pub(super) fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     let mode = app.visualizer.mode;
-    let active = app.playing_index.is_some() && !app.player.is_paused();
+    let active = app.playing_index.is_some() && !app.audio.is_paused();
     let title = format!(" Visualizer — {} ", mode.label());
     let block = Block::default()
         .borders(Borders::ALL)
@@ -48,7 +48,7 @@ pub(super) fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
         VisMode::Lissajous => draw_lissajous(frame, inner, app, active),
         VisMode::Spectrum3D => draw_spectrum_3d(frame, inner, app, active),
         VisMode::Cassette => {
-            if app.video.is_some() {
+            if app.video.is_loaded() {
                 draw_vhs(frame, inner, app, active);
             } else {
                 draw_cassette(frame, inner, app, active);
@@ -60,8 +60,8 @@ pub(super) fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
 fn draw_spectrum(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let bar_width: u16 = 2;
     let bars = (area.width / bar_width).max(1) as usize;
-    let sr = app.player.tap.sample_rate();
-    let mags = app.visualizer.spectrum(&app.player.tap, bars, sr, active);
+    let sr = app.audio.tap().sample_rate();
+    let mags = app.visualizer.spectrum(app.audio.tap(), bars, sr, active);
     let h = area.height as usize;
     let buf = frame.buffer_mut();
     for (i, m) in mags.iter().enumerate() {
@@ -77,9 +77,10 @@ fn draw_spectrum(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
             let color = bar_color(row, h);
             if row < full_cells {
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char('█');
-                    cell.set_fg(color);
-                    cell.set_bg(panel_bg());
+                    // Solid part of the bar: fill via background so the web
+                    // canvas has no inter-row gap.
+                    cell.set_char(' ');
+                    cell.set_bg(color);
                 }
             } else if row == full_cells && frac_eighths > 0 {
                 let ch = match frac_eighths {
@@ -119,7 +120,7 @@ fn bar_color(row: usize, h: usize) -> Color {
 fn draw_waveform(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w = area.width as usize;
     let h = area.height as usize;
-    let points = app.visualizer.waveform(&app.player.tap, w, active);
+    let points = app.visualizer.waveform(app.audio.tap(), w, active);
     draw_amplitude_strip(frame, area, &points, w, h);
 }
 
@@ -143,15 +144,27 @@ fn draw_amplitude_strip(frame: &mut Frame, area: Rect, points: &[f32], w: usize,
             let color = lerp(cyan(), pink(), d as f32 / mid.max(1) as f32);
             let yu = mid.saturating_sub(d);
             let yd = (mid + d).min(h - 1);
+            // Inner cells fill via background (no web-canvas row gap); the tip
+            // cell keeps a half-block glyph for the amplitude edge.
             if let Some(cell) = buf.cell_mut((area.x + i as u16, area.y + yu as u16)) {
-                cell.set_char(if d == amp { '▀' } else { '█' });
-                cell.set_fg(color);
-                cell.set_bg(panel_bg());
+                if d == amp {
+                    cell.set_char('▀');
+                    cell.set_fg(color);
+                    cell.set_bg(panel_bg());
+                } else {
+                    cell.set_char(' ');
+                    cell.set_bg(color);
+                }
             }
             if let Some(cell) = buf.cell_mut((area.x + i as u16, area.y + yd as u16)) {
-                cell.set_char(if d == amp { '▄' } else { '█' });
-                cell.set_fg(color);
-                cell.set_bg(panel_bg());
+                if d == amp {
+                    cell.set_char('▄');
+                    cell.set_fg(color);
+                    cell.set_bg(panel_bg());
+                } else {
+                    cell.set_char(' ');
+                    cell.set_bg(color);
+                }
             }
         }
     }
@@ -167,7 +180,7 @@ fn draw_scrolling_waveform(frame: &mut Frame, area: Rect, app: &mut App, active:
     }
     // Two columns of braille dots per terminal cell -> oversample by 2.
     let dots = w.saturating_mul(2).max(2);
-    let points = app.visualizer.scrolling_waveform(&app.player.tap, dots, active);
+    let points = app.visualizer.scrolling_waveform(app.audio.tap(), dots, active);
     // Slight headroom so peaks at 1.0 don't clip into the top border.
     let y_max = 1.05f64;
     let canvas = Canvas::default()
@@ -209,8 +222,8 @@ fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
     if w == 0 || h == 0 {
         return;
     }
-    let sr = app.player.tap.sample_rate();
-    let cols = app.visualizer.spectrogram(&app.player.tap, w, h, sr, active);
+    let sr = app.audio.tap().sample_rate();
+    let cols = app.visualizer.spectrogram(app.audio.tap(), w, h, sr, active);
     let buf = frame.buffer_mut();
     let n_cols = cols.len();
     let start_x = (area.width as usize).saturating_sub(n_cols);
@@ -226,9 +239,10 @@ fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
             let y = area.y + area.height - 1 - yi as u16;
             let color = heatmap(*mag);
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char('█');
-                cell.set_fg(color);
-                cell.set_bg(panel_bg());
+                // Paint the cell via its background so it fills the full cell on
+                // the web canvas backend (a `█` glyph leaves a row gap there).
+                cell.set_char(' ');
+                cell.set_bg(color);
             }
         }
     }
@@ -243,7 +257,7 @@ fn draw_lissajous(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     if w == 0 || h == 0 {
         return;
     }
-    let pts = app.visualizer.lissajous(&app.player.tap, 2048, active);
+    let pts = app.visualizer.lissajous(app.audio.tap(), 2048, active);
     // Keep the plot square in pixel terms: cells are ~2:1, so the X bounds
     // are twice the Y bounds and we letterbox via the Canvas bounds.
     let cell_aspect = 2.0f64;
@@ -336,8 +350,8 @@ fn draw_spectrum_3d(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
     // Pack a dense stack of history rows — the reference look depends on lots
     // of overlapping silhouettes.
     let depth_rows = (h.saturating_mul(2)).clamp(18, 40);
-    let sr = app.player.tap.sample_rate();
-    let rows = app.visualizer.spectrum_3d(&app.player.tap, bins, sr, depth_rows, active);
+    let sr = app.audio.tap().sample_rate();
+    let rows = app.visualizer.spectrum_3d(app.audio.tap(), bins, sr, depth_rows, active);
     if rows.is_empty() {
         return;
     }

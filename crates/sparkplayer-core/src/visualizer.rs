@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 
-use crate::audio::SampleBuffer;
+use crate::audio_tap::SampleBuffer;
 
 const FFT_SIZE: usize = 1024;
 const WAVE_SIZE: usize = 2048;

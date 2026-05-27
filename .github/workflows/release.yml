@@ -53,7 +53,7 @@ jobs:
         run: cargo install cargo-deb --locked
 
       - name: Build .deb package
-        run: cargo deb --no-build --target ${{ env.TARGET }}
+        run: cargo deb --no-build -p sparkplayer-native --target ${{ env.TARGET }}
 
       - name: Stage zip archive
         run: |
@@ -119,7 +119,7 @@ jobs:
 
       - name: Build .deb package
         # --no-strip: skip host `strip` (it cannot operate on a foreign binary)
-        run: cargo deb --no-build --no-strip --target ${{ matrix.target }}
+        run: cargo deb --no-build --no-strip -p sparkplayer-native --target ${{ matrix.target }}
 
       - name: Stage zip archive
         run: |
@@ -212,10 +212,10 @@ jobs:
 
       - name: Initialize WiX template
         # The generated wix/main.wxs is not committed; regenerate per build.
-        run: cargo wix init --force
+        run: cargo wix init -p sparkplayer-native --force
 
       - name: Build MSI installer
-        run: cargo wix --no-build --nocapture --target ${{ env.TARGET }} --output target/wix
+        run: cargo wix -p sparkplayer-native --no-build --nocapture --target ${{ env.TARGET }} --output target/wix
 
       - name: Stage zip archive
         shell: pwsh
@@ -239,6 +239,53 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Web (WASM): the browser bundle built with Trunk, packaged as a .tar.gz
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web (WASM)
+    runs-on: ubuntu-latest
+    env:
+      SUFFIX: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-unknown-unknown
+
+      - name: Install Trunk
+        run: cargo install trunk --locked
+
+      - name: Build web bundle
+        # `--public-url ./` makes the bundle reference its assets relatively so
+        # it works when served from any subdirectory after extraction. Trunk
+        # fetches its own wasm-bindgen/wasm-opt.
+        run: trunk build --release --public-url ./
+        working-directory: crates/sparkplayer-web
+
+      - name: Stage tar.gz archive
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          STAGE="sparkplayer-${VERSION}-${SUFFIX}"
+          mkdir -p "${STAGE}"
+          cp -r crates/sparkplayer-web/dist/. "${STAGE}/"
+          tar -czf "${STAGE}.tar.gz" "${STAGE}"
+          echo "TARBALL=${STAGE}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SUFFIX }}
+          path: ${{ env.TARBALL }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Publish a GitHub Release with all artifacts when a v* tag is pushed.
   # ---------------------------------------------------------------------------
   release:
@@ -248,6 +295,7 @@ jobs:
       - linux-x86_64
       - linux-cross
       - windows-x86_64
+      - web
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -258,7 +306,7 @@ jobs:
       - name: Collect release assets
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.zip" -o -name "*.deb" -o -name "*.msi" \) \
+          find artifacts -type f \( -name "*.zip" -o -name "*.deb" -o -name "*.msi" -o -name "*.tar.gz" \) \
             -exec cp -v {} release/ \;
           ls -la release
 

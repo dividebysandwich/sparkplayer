@@ -189,7 +189,7 @@ pub(super) fn draw_escape_menu(frame: &mut Frame, area: Rect, app: &App) {
             String::new()
         } else if item.kind == EscapeMenuKind::Volume {
             // Render a small horizontal slider next to the percentage.
-            let bar = volume_bar(app.player.volume(), value_col.saturating_sub(7));
+            let bar = volume_bar(app.audio.volume(), value_col.saturating_sub(7));
             format!("{} {}", bar, item.value)
         } else if matches!(
             item.kind,

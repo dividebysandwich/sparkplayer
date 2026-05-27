@@ -1,13 +1,13 @@
-//! The video panel: scales the decoded frame to fit while preserving aspect,
-//! and renders the active subtitle cue (or a transient announcement) in a
-//! fixed-height strip below it.
+//! The video panel: frames the picture area and renders the active subtitle
+//! cue (or a transient announcement) in a fixed-height strip below it. The
+//! actual picture is drawn by the `VideoBackend` (native: a scaled
+//! ratatui-image; web: a `<video>` overlay positioned at the recorded rect).
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::App;
 
@@ -29,10 +29,8 @@ pub(super) fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Reserve a fixed-height strip below the video whenever a subtitle track
-    // is active, so the video frame doesn't shift up/down as cues come and go.
-    // The strip is sized for the maximum cue height (2 lines); empty rows are
-    // simply left blank between cues.
+    // Reserve a fixed-height strip below the video whenever a subtitle track is
+    // active, so the video frame doesn't shift as cues come and go.
     const SUB_STRIP_ROWS: u16 = 2;
     let announcement = app.subtitle_announcement();
     let subs_active = app.active_subtitle_track.is_some() && app.subtitles.track_count() > 0;
@@ -46,53 +44,18 @@ pub(super) fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         (inner, None)
     };
+
     // Prefer a real cue over the announcement when both are present.
-    let strip_text: Option<String> = app
-        .current_subtitle_text
-        .clone()
-        .or(announcement);
+    let strip_text: Option<String> = app.current_subtitle_text.clone().or(announcement);
     let sub_lines: Vec<String> = match (sub_area, strip_text.as_deref()) {
         (Some(area), Some(text)) => wrap_subtitle(text, area.width as usize, SUB_STRIP_ROWS as usize),
         _ => Vec::new(),
     };
 
-    let font_size = app
-        .picker
-        .as_ref()
-        .map(|p| p.font_size())
-        .unwrap_or(ratatui_image::FontSize::new(8, 16));
-    let font_w = font_size.width;
-    let font_h = font_size.height;
-    let dims = app.video_dims;
-
-    if let Some(proto) = app.video_protocol.as_mut() {
-        let (iw, ih) = dims.unwrap_or((1, 1));
-        let iw = iw.max(1);
-        let ih = ih.max(1);
-
-        let avail_w_px = video_area.width as u32 * font_w.max(1) as u32;
-        let avail_h_px = video_area.height as u32 * font_h.max(1) as u32;
-
-        let scale = (avail_w_px as f64 / iw as f64).min(avail_h_px as f64 / ih as f64);
-        let fit_w_px = (iw as f64 * scale).round() as u32;
-        let fit_h_px = (ih as f64 * scale).round() as u32;
-
-        let cells_w = ((fit_w_px + font_w as u32 - 1) / font_w.max(1) as u32)
-            .max(1)
-            .min(video_area.width as u32) as u16;
-        let cells_h = ((fit_h_px + font_h as u32 - 1) / font_h.max(1) as u32)
-            .max(1)
-            .min(video_area.height as u32) as u16;
-
-        let x = video_area.x + (video_area.width - cells_w) / 2;
-        let y = video_area.y + (video_area.height - cells_h) / 2;
-        let img_area = Rect::new(x, y, cells_w, cells_h);
-        frame.render_stateful_widget(
-            StatefulImage::default().resize(Resize::Scale(None)),
-            img_area,
-            proto,
-        );
-    }
+    // Record the picture rect for the web overlay, then let the backend paint
+    // it (native) or no-op (web).
+    app.last_video_rect = Some(video_area);
+    app.video.render(frame, video_area);
 
     if let Some(sub_area) = sub_area {
         let lines: Vec<Line> = sub_lines
@@ -135,7 +98,6 @@ fn wrap_subtitle(text: &str, width: usize, max_lines: usize) -> Vec<String> {
                 if word.chars().count() <= width {
                     current.push_str(word);
                 } else {
-                    // Word longer than width — break inside the word.
                     let mut chars = word.chars();
                     loop {
                         let chunk: String = chars.by_ref().take(width).collect();
@@ -166,16 +128,10 @@ fn wrap_subtitle(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     if out.len() > max_lines {
         out.truncate(max_lines);
     }
-    // If we hit the cap and there is still more text we didn't fit, indicate
-    // truncation on the last line.
     let total_text_words = text.split_whitespace().count();
-    let used_words: usize = out
-        .iter()
-        .map(|l| l.split_whitespace().count())
-        .sum();
+    let used_words: usize = out.iter().map(|l| l.split_whitespace().count()).sum();
     if used_words < total_text_words {
         if let Some(last) = out.last_mut() {
-            // Ensure room for the ellipsis.
             while last.chars().count() + 1 > width {
                 last.pop();
             }
