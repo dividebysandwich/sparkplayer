@@ -209,8 +209,38 @@ fn set_canvas_font(document: &Document) {
     if let Ok(Some(ctx)) = canvas.get_context("2d") {
         if let Ok(ctx) = ctx.dyn_into::<web_sys::CanvasRenderingContext2d>() {
             ctx.set_font("16px 'MesloLGM Nerd Font Mono', monospace");
+            install_text_centering(&ctx);
         }
     }
+}
+
+/// ratzilla's canvas backend top-aligns glyphs (textBaseline "top", drawn at
+/// `row*CELL_HEIGHT`), but its 19px cell is taller than the 16px font, so text
+/// hugs the top. Cell backgrounds are drawn with `fillRect` (unaffected), while
+/// glyphs go through `fillText` — so we shadow the context's `fillText` with a
+/// wrapper that nudges the y down, vertically centering the text only.
+fn install_text_centering(ctx: &web_sys::CanvasRenderingContext2d) {
+    // ~half the (cell - font) leading, biased a touch lower since the visible
+    // glyph sits high within the em box.
+    const Y_OFFSET: f64 = 2.5;
+    let key = JsValue::from_str("fillText");
+    let Ok(orig) = js_sys::Reflect::get(ctx, &key) else {
+        return;
+    };
+    if !orig.is_function() {
+        return;
+    }
+    let orig_fn: js_sys::Function = orig.unchecked_into();
+    let this: JsValue = ctx.clone().into();
+    let wrapper = Closure::<dyn FnMut(JsValue, f64, f64) -> JsValue>::new(
+        move |text: JsValue, x: f64, y: f64| -> JsValue {
+            let args =
+                js_sys::Array::of3(&text, &JsValue::from_f64(x), &JsValue::from_f64(y + Y_OFFSET));
+            orig_fn.apply(&this, &args).unwrap_or(JsValue::UNDEFINED)
+        },
+    );
+    let _ = js_sys::Reflect::set(ctx, &key, wrapper.as_ref());
+    wrapper.forget();
 }
 
 /// Current inner window size in CSS pixels, for sizing the canvas grid.
