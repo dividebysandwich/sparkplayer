@@ -49,6 +49,38 @@ impl SubtitleSet {
         guard.get(idx).map(|t| t.label.clone())
     }
 
+    /// Locate a track by language hint, returning its index. Matches the
+    /// requested string (case-insensitive) against the ISO language tag first
+    /// and the human label second. Empty input returns None.
+    pub fn find_track_by_language(&self, query: &str) -> Option<usize> {
+        let q = query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            return None;
+        }
+        let guard = self.inner.tracks.lock().ok()?;
+        // Exact match on the ISO language code wins over anything else.
+        for (i, t) in guard.iter().enumerate() {
+            if let Some(lang) = t.language.as_ref() {
+                if lang.to_ascii_lowercase() == q {
+                    return Some(i);
+                }
+            }
+        }
+        // Fall back to a label match (exact, then substring) so users can pass
+        // e.g. "english" or "fr" interchangeably.
+        for (i, t) in guard.iter().enumerate() {
+            if t.label.to_ascii_lowercase() == q {
+                return Some(i);
+            }
+        }
+        for (i, t) in guard.iter().enumerate() {
+            if t.label.to_ascii_lowercase().contains(&q) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     pub fn cue_at(&self, track_idx: usize, secs: f64) -> Option<String> {
         let guard = self.inner.tracks.lock().ok()?;
         let track = guard.get(track_idx)?;

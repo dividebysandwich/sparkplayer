@@ -155,6 +155,11 @@ pub struct App {
     pub current_subtitle_text: Option<String>,
     pub subtitle_announcement_until: Option<Instant>,
     last_subtitle_track_count: usize,
+    pub preferred_subtitle_lang: Option<String>,
+    /// True once we've satisfied (or failed to satisfy) the CLI subtitle-lang
+    /// request for the currently loaded video. Reset on every play_index so a
+    /// new file gets a fresh shot at the preference.
+    preferred_subtitle_applied: bool,
 
     pub should_quit: bool,
     pub show_help: bool,
@@ -223,6 +228,8 @@ impl App {
             current_subtitle_text: None,
             subtitle_announcement_until: None,
             last_subtitle_track_count: 0,
+            preferred_subtitle_lang: None,
+            preferred_subtitle_applied: false,
             should_quit: false,
             show_help: false,
             show_escape_menu: false,
@@ -427,6 +434,7 @@ impl App {
         self.current_subtitle_text = None;
         self.subtitle_announcement_until = None;
         self.last_subtitle_track_count = 0;
+        self.preferred_subtitle_applied = false;
 
         match self.player.play_file(&path) {
             Ok(dur_hint) => {
@@ -491,6 +499,27 @@ impl App {
             self.subtitle_announcement_until = Some(Instant::now() + Duration::from_secs(5));
         }
         self.last_subtitle_track_count = count;
+        // Honor a CLI-requested subtitle language: keep trying as embedded
+        // tracks finish extracting in the background. Once a match is found we
+        // flip `preferred_subtitle_applied` so the user can switch tracks
+        // later via `c` without us snapping it back.
+        if !self.preferred_subtitle_applied
+            && self.preferred_subtitle_lang.is_some()
+            && count > 0
+        {
+            let lang = self.preferred_subtitle_lang.clone().unwrap();
+            if let Some(idx) = self.subtitles.find_track_by_language(&lang) {
+                self.active_subtitle_track = Some(idx);
+                self.current_subtitle_text = None;
+                self.status = format!(
+                    "Subtitles: {}",
+                    self.subtitles
+                        .track_label(idx)
+                        .unwrap_or_else(|| format!("Track {}", idx + 1))
+                );
+                self.preferred_subtitle_applied = true;
+            }
+        }
         // Drop the external window if it died (close button, init failure).
         if self.external_window.as_ref().is_some_and(|w| !w.is_alive()) {
             self.external_window = None;

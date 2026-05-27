@@ -70,6 +70,16 @@ struct Cli {
     /// protocol support, so it always falls back to halfblocks.
     #[arg(long, value_enum, default_value_t = GraphicsArg::Auto)]
     graphics: GraphicsArg,
+
+    /// Open the dedicated SDL fullscreen window for video playback at startup.
+    #[arg(long)]
+    video_window: bool,
+
+    /// Preferred subtitle language (ISO code like `eng`/`en` or a label like
+    /// `English`). The first matching track is activated as soon as subtitles
+    /// finish loading.
+    #[arg(long, value_name = "LANG")]
+    subtitle_lang: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -89,6 +99,8 @@ fn main() -> Result<()> {
 
     let cfg = config::load();
     let mut app = App::new(tracks, initial_dir, cli.graphics.into(), &cfg)?;
+    app.preferred_subtitle_lang = cli.subtitle_lang.clone();
+    app.external_window_enabled = cli.video_window;
 
     let mut terminal = setup_terminal().context("setting up terminal")?;
     // Picker queries the terminal — must happen after raw mode is enabled
