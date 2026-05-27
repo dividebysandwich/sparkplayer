@@ -28,8 +28,7 @@ use web_sys::{
 };
 
 use ratzilla::backend::canvas::CanvasBackendOptions;
-use ratzilla::event::{KeyCode as RKeyCode, KeyEvent as RKeyEvent};
-use ratzilla::{CanvasBackend, WebRenderer};
+use ratzilla::CanvasBackend;
 
 use sparkplayer_core::backend::{CoreKey, CoreKeyEvent};
 use sparkplayer_core::library::Track;
@@ -120,71 +119,76 @@ pub fn start() -> Result<(), JsValue> {
     wire_file_input(&document, "file-input", app.clone(), meta_map.clone());
     wire_file_input(&document, "dir-input", app.clone(), meta_map.clone());
 
-    // Build the ratzilla terminal and run. The canvas backend renders a fixed
-    // pixel cell grid (immune to DOM font-metric drift) and lays text out to
-    // the grid, so the UI fits exactly — unlike the DOM backend.
-    let (cw, ch) = window_size(&window);
-    let backend = CanvasBackend::new_with_options(
-        CanvasBackendOptions::default().grid_id(ROOT_ID).size((cw, ch)),
-    )
-    .map_err(to_js)?;
-    let terminal = Terminal::new(backend).map_err(to_js)?;
+    // The canvas backend can't resize its grid after creation, so we own the
+    // terminal in a cell and rebuild it whenever the window resizes. We also
+    // drive rendering with our own requestAnimationFrame loop (instead of
+    // ratzilla's `draw_web`, which owns an unstoppable loop) so the terminal can
+    // be swapped cleanly, and handle keys with our own listener.
+    let terminal: Rc<RefCell<Option<Terminal<CanvasBackend>>>> = Rc::new(RefCell::new(None));
+    rebuild_terminal(&window, &document, &terminal)?;
 
-    // The canvas backend hardcodes "16px monospace" once at creation and reuses
-    // that context for every fill_text. Override it to the bundled Meslo Nerd
-    // Font; once the webfont finishes loading, the per-frame redraws pick it up.
-    set_canvas_font(&document);
-
+    // Mark a resize as pending; the render loop rebuilds at most once per frame.
+    let resize_pending = Rc::new(Cell::new(false));
     {
-        let app = app.clone();
-        let first_gesture = Rc::new(Cell::new(true));
-        terminal.on_key_event(move |ev: RKeyEvent| {
-            let mut a = app.borrow_mut();
-            if first_gesture.replace(false) {
-                a.audio.on_user_gesture();
-                if a.playing_index.is_none() && !a.tracks.is_empty() {
-                    let _ = a.play_index(0);
-                }
-            }
-            let _ = a.handle_key(map_key(ev));
+        let resize_pending = resize_pending.clone();
+        let on_resize = Closure::<dyn FnMut(Event)>::new(move |_e: Event| {
+            resize_pending.set(true);
         });
+        let _ =
+            window.add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
+        on_resize.forget();
     }
 
+    install_keyboard(&document, app.clone());
+
+    // Render loop.
     {
         let app = app.clone();
+        let window = window.clone();
+        let document = document.clone();
         let video_el = video_el.clone();
         let img_el = img_el.clone();
-        let document = document.clone();
+        let terminal = terminal.clone();
         let perf = window.performance();
-        // Tracks the locator of the track whose extras (art/subs) we've already
-        // kicked off, so we fetch them exactly once per track change.
         let loaded_extras_for: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-        terminal.draw_web(move |frame| {
-            let mut a = app.borrow_mut();
-            let now = perf.as_ref().map(|p| p.now() / 1000.0).unwrap_or(0.0);
-            a.set_clock(now);
-            a.audio.pump();
-            if a.current_duration.is_none() {
-                a.current_duration = a.audio.duration();
+
+        let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+        let g = f.clone();
+        *g.borrow_mut() = Some(Closure::<dyn FnMut()>::new(move || {
+            if resize_pending.replace(false) {
+                let _ = rebuild_terminal(&window, &document, &terminal);
             }
-            let _ = a.check_advance();
-            a.tick_video();
-            sparkplayer_core::ui::draw(frame, &mut a);
+            let now = perf.as_ref().map(|p| p.now() / 1000.0).unwrap_or(0.0);
+            if let Some(term) = terminal.borrow_mut().as_mut() {
+                let mut a = app.borrow_mut();
+                a.set_clock(now);
+                a.audio.pump();
+                if a.current_duration.is_none() {
+                    a.current_duration = a.audio.duration();
+                }
+                let _ = a.check_advance();
+                a.tick_video();
+                let mut area = Rect::default();
+                let _ = term.draw(|frame| {
+                    area = frame.area();
+                    sparkplayer_core::ui::draw(frame, &mut a);
+                });
+                position_overlays(&document, &a, &video_el, &img_el, area);
 
-            let term = frame.area();
-            position_overlays(&document, &a, &video_el, &img_el, term);
-
-            // On track change, load this track's manifest extras (cover + subs).
-            let cur = a.playing_track.as_ref().map(|t| t.locator());
-            if cur != *loaded_extras_for.borrow() {
-                *loaded_extras_for.borrow_mut() = cur.clone();
-                if let Some(url) = cur {
-                    if let Some(extra) = extras.borrow().get(&url).cloned() {
-                        load_track_extras(app.clone(), url, extra);
+                // On track change, load this track's manifest extras.
+                let cur = a.playing_track.as_ref().map(|t| t.locator());
+                if cur != *loaded_extras_for.borrow() {
+                    *loaded_extras_for.borrow_mut() = cur.clone();
+                    if let Some(url) = cur {
+                        if let Some(extra) = extras.borrow().get(&url).cloned() {
+                            load_track_extras(app.clone(), url, extra);
+                        }
                     }
                 }
             }
-        });
+            request_animation_frame(f.borrow().as_ref().unwrap());
+        }));
+        request_animation_frame(g.borrow().as_ref().unwrap());
     }
 
     Ok(())
@@ -224,24 +228,100 @@ fn window_size(window: &Window) -> (u32, u32) {
     (w.max(1.0) as u32, h.max(1.0) as u32)
 }
 
-/// Map a ratzilla key event to the platform-neutral [`CoreKeyEvent`].
-fn map_key(ev: RKeyEvent) -> CoreKeyEvent {
-    let code = match ev.code {
-        RKeyCode::Char(c) => CoreKey::Char(c),
-        RKeyCode::Up => CoreKey::Up,
-        RKeyCode::Down => CoreKey::Down,
-        RKeyCode::Left => CoreKey::Left,
-        RKeyCode::Right => CoreKey::Right,
-        RKeyCode::PageUp => CoreKey::PageUp,
-        RKeyCode::PageDown => CoreKey::PageDown,
-        RKeyCode::Home => CoreKey::Home,
-        RKeyCode::End => CoreKey::End,
-        RKeyCode::Tab => CoreKey::Tab,
-        RKeyCode::Enter => CoreKey::Enter,
-        RKeyCode::Esc => CoreKey::Esc,
-        _ => CoreKey::Other,
+/// (Re)create the canvas terminal sized to the current window, replacing any
+/// previous one. Clears the old `<canvas>` out of the root first so they don't
+/// stack, and re-applies the Meslo font to the fresh context.
+fn rebuild_terminal(
+    window: &Window,
+    document: &Document,
+    cell: &Rc<RefCell<Option<Terminal<CanvasBackend>>>>,
+) -> Result<(), JsValue> {
+    *cell.borrow_mut() = None;
+    if let Some(root) = document.get_element_by_id(ROOT_ID) {
+        root.set_inner_html("");
+    }
+    let (cw, ch) = window_size(window);
+    let backend = CanvasBackend::new_with_options(
+        CanvasBackendOptions::default().grid_id(ROOT_ID).size((cw, ch)),
+    )
+    .map_err(to_js)?;
+    let term = Terminal::new(backend).map_err(to_js)?;
+    // The canvas backend hardcodes "16px monospace" at creation and reuses that
+    // context for every fill_text; point it at the bundled Meslo Nerd Font.
+    set_canvas_font(document);
+    *cell.borrow_mut() = Some(term);
+    Ok(())
+}
+
+fn request_animation_frame(closure: &Closure<dyn FnMut()>) {
+    if let Some(w) = web_sys::window() {
+        let _ = w.request_animation_frame(closure.as_ref().unchecked_ref());
+    }
+}
+
+/// Install a `keydown` listener that maps browser key events to the core keymap.
+/// Independent of the terminal's lifetime so resizes don't drop it.
+fn install_keyboard(document: &Document, app: SharedApp) {
+    let first_gesture = Rc::new(Cell::new(true));
+    let handler = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+        let core = map_keyboard_event(&ev);
+        // Stop the browser from scrolling/focus-cycling on keys we consume.
+        if should_prevent_default(core.code) {
+            ev.prevent_default();
+        }
+        let mut a = app.borrow_mut();
+        if first_gesture.replace(false) {
+            a.audio.on_user_gesture();
+            if a.playing_index.is_none() && !a.tracks.is_empty() {
+                let _ = a.play_index(0);
+            }
+        }
+        let _ = a.handle_key(core);
+    });
+    let _ = document.add_event_listener_with_callback("keydown", handler.as_ref().unchecked_ref());
+    handler.forget();
+}
+
+/// Map a browser `KeyboardEvent` to the platform-neutral [`CoreKeyEvent`].
+fn map_keyboard_event(ev: &web_sys::KeyboardEvent) -> CoreKeyEvent {
+    let key = ev.key();
+    let code = match key.as_str() {
+        "ArrowUp" => CoreKey::Up,
+        "ArrowDown" => CoreKey::Down,
+        "ArrowLeft" => CoreKey::Left,
+        "ArrowRight" => CoreKey::Right,
+        "Enter" => CoreKey::Enter,
+        "Tab" => CoreKey::Tab,
+        "Escape" => CoreKey::Esc,
+        "Home" => CoreKey::Home,
+        "End" => CoreKey::End,
+        "PageUp" => CoreKey::PageUp,
+        "PageDown" => CoreKey::PageDown,
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => CoreKey::Char(c),
+                _ => CoreKey::Other,
+            }
+        }
     };
-    CoreKeyEvent::with_ctrl(code, ev.ctrl)
+    CoreKeyEvent::with_ctrl(code, ev.ctrl_key())
+}
+
+fn should_prevent_default(code: CoreKey) -> bool {
+    matches!(
+        code,
+        CoreKey::Tab
+            | CoreKey::Up
+            | CoreKey::Down
+            | CoreKey::Left
+            | CoreKey::Right
+            | CoreKey::PageUp
+            | CoreKey::PageDown
+            | CoreKey::Home
+            | CoreKey::End
+            | CoreKey::Char(' ')
+    )
 }
 
 /// Common style for a floating overlay element (hidden until positioned).

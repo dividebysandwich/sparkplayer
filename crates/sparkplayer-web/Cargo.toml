@@ -52,6 +52,7 @@ features = [
     "Url",
     "Event",
     "EventTarget",
+    "KeyboardEvent",
     "DragEvent",
     "DataTransfer",
     "CssStyleDeclaration",
