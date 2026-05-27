@@ -6,8 +6,8 @@
 # from cross-rs's main branch on a current Ubuntu base (clang ≥ 14, FFmpeg
 # ≥ 4.4), which is what we need.
 #
-# Each pre-build step installs the target architecture's ALSA + FFmpeg dev
-# headers via Debian multi-arch, plus clang/libclang for bindgen.
+# Each pre-build step installs the target architecture's ALSA + FFmpeg + SDL2
+# dev headers via Debian multi-arch, plus clang/libclang for bindgen.
 
 [build.env]
 # `cross` strips environment variables by default; forward the bindgen /
@@ -24,7 +24,7 @@ image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install --assume-yes libc6-dev:$CROSS_DEB_ARCH linux-libc-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev"
+    "apt-get install --assume-yes libc6-dev:$CROSS_DEB_ARCH linux-libc-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH libsdl2-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev"
 ]
 
 [target.armv7-unknown-linux-gnueabihf]
@@ -32,7 +32,7 @@ image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:main"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install --assume-yes libc6-dev:$CROSS_DEB_ARCH linux-libc-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev",
+    "apt-get install --assume-yes libc6-dev:$CROSS_DEB_ARCH linux-libc-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH libsdl2-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev",
     # ffmpeg-sys-next builds a small `check.c` for the HOST arch (x86_64) but
     # pkg-config feeds it -I/usr/include/arm-linux-gnueabihf from the FFmpeg
     # Cflags. That pulls the armhf gnu/stubs.h into a host compile, which then

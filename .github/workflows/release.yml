@@ -31,13 +31,14 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
-      - name: Install ALSA + FFmpeg development headers
+      - name: Install ALSA + FFmpeg + SDL2 development headers
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libasound2-dev \
             libavcodec-dev libavformat-dev libavutil-dev \
             libswresample-dev libswscale-dev \
+            libsdl2-dev \
             pkg-config clang libclang-dev
 
       - name: Cache cargo registry and build artifacts
@@ -178,6 +179,21 @@ jobs:
           # next to the binary after build.
           echo "FFMPEG_BIN=$root\bin" >> $env:GITHUB_ENV
 
+      - name: Install SDL2 (VC dev libraries)
+        shell: pwsh
+        run: |
+          # Prebuilt SDL2 development libraries for MSVC. sdl2-sys (no `bundled`
+          # feature) emits a plain `link-lib=SDL2`, so the linker just needs
+          # SDL2.lib on the LIB search path; the .zip/MSI need SDL2.dll at runtime.
+          $url = 'https://github.com/libsdl-org/SDL/releases/download/release-2.32.4/SDL2-devel-2.32.4-VC.zip'
+          Invoke-WebRequest -Uri $url -OutFile sdl2.zip -UseBasicParsing
+          Expand-Archive -Path sdl2.zip -DestinationPath sdl2-dist -Force
+          $root = (Get-ChildItem sdl2-dist -Directory | Select-Object -First 1).FullName
+          # Prepend the x64 lib dir to LIB so link.exe finds SDL2.lib.
+          echo "LIB=$root\lib\x64;$env:LIB" >> $env:GITHUB_ENV
+          # SDL2.dll lives alongside the .lib files; stage it next to the binary.
+          echo "SDL2_BIN=$root\lib\x64" >> $env:GITHUB_ENV
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ env.TARGET }}
 
@@ -188,6 +204,8 @@ jobs:
           # them alongside sparkplayer.exe so the .zip and MSI are runnable on
           # systems without FFmpeg installed.
           Copy-Item "$env:FFMPEG_BIN\*.dll" "target/$env:TARGET/release/" -Force
+          # SDL2.dll likewise needs to ship next to the binary.
+          Copy-Item "$env:SDL2_BIN\SDL2.dll" "target/$env:TARGET/release/" -Force
 
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
