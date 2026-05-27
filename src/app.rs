@@ -7,11 +7,13 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
 
 use crate::audio::AudioPlayer;
+use crate::config;
 use crate::library::{self, Track};
 use crate::metadata::{self, TrackMeta};
 use crate::subtitles::{self, SubtitleSet};
+use crate::theme::{self, Theme};
 use crate::video::VideoStream;
-use crate::visualizer::Visualizer;
+use crate::visualizer::{VisMode, Visualizer};
 
 /// Empirical baseline for the audio path lag (CPAL ring + OS audio server
 /// queue + DAC) on a typical PulseAudio/PipeWire setup. CPAL can only tell us
@@ -135,6 +137,8 @@ pub struct App {
     pub show_help: bool,
     pub fullscreen_vis: bool,
 
+    pub theme: Theme,
+
     graphics_choice: GraphicsChoice,
 }
 
@@ -143,11 +147,18 @@ impl App {
         initial_tracks: Vec<Track>,
         initial_dir: PathBuf,
         graphics_choice: GraphicsChoice,
+        cfg: &config::Config,
     ) -> Result<Self> {
-        let player = AudioPlayer::new()?;
+        let mut player = AudioPlayer::new()?;
+        player.set_volume(cfg.volume);
         let audio_output_latency_secs = player.output_buffer_latency().as_secs_f64();
         let initial_av_offset = baseline_av_offset(audio_output_latency_secs);
-        let visualizer = Visualizer::new();
+        let mut visualizer = Visualizer::new();
+        if let Some(mode) = VisMode::from_name(&cfg.visualizer) {
+            visualizer.mode = mode;
+        }
+        let theme = theme::by_name(&cfg.theme);
+        theme::set_current(theme);
         let mut playlist_state = ListState::default();
         if !initial_tracks.is_empty() {
             playlist_state.select(Some(0));
@@ -188,6 +199,7 @@ impl App {
             should_quit: false,
             show_help: false,
             fullscreen_vis: false,
+            theme,
             graphics_choice,
         };
         app.refresh_browser();
@@ -760,6 +772,33 @@ impl App {
         let v = (self.player.volume() + delta).clamp(0.0, 1.5);
         self.player.set_volume(v);
         self.status = format!("Volume: {:>3.0}%", v * 100.0);
+        self.save_config();
+    }
+
+    pub fn cycle_visualizer(&mut self) {
+        self.visualizer.toggle_mode();
+        self.status = format!("Visualizer: {}", self.visualizer.mode.label());
+        self.save_config();
+    }
+
+    pub fn cycle_theme(&mut self) {
+        let next = theme::next_after(self.theme.name);
+        self.theme = next;
+        theme::set_current(next);
+        self.status = format!("Theme: {}", next.label);
+        self.save_config();
+    }
+
+    /// Persist the user-tunable bits (theme, volume, visualizer) to the
+    /// platform config directory. Errors are swallowed: a write failure on a
+    /// read-only home shouldn't crash the player mid-session.
+    pub fn save_config(&self) {
+        let cfg = config::Config {
+            theme: self.theme.name.to_string(),
+            volume: self.player.volume(),
+            visualizer: self.visualizer.mode.name().to_string(),
+        };
+        config::save(&cfg);
     }
 
     pub fn position(&self) -> Duration {

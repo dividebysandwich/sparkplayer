@@ -42,6 +42,30 @@ impl VisMode {
             VisMode::Cassette => VisMode::Spectrum,
         }
     }
+    /// Stable identifier used in the persisted config file.
+    pub fn name(&self) -> &'static str {
+        match self {
+            VisMode::Spectrum => "spectrum",
+            VisMode::Waveform => "waveform",
+            VisMode::ScrollingWaveform => "scrolling-wave",
+            VisMode::Spectrogram => "spectrogram",
+            VisMode::Lissajous => "lissajous",
+            VisMode::Spectrum3D => "spectrum-3d",
+            VisMode::Cassette => "cassette",
+        }
+    }
+    pub fn from_name(s: &str) -> Option<Self> {
+        Some(match s {
+            "spectrum" => VisMode::Spectrum,
+            "waveform" => VisMode::Waveform,
+            "scrolling-wave" => VisMode::ScrollingWaveform,
+            "spectrogram" => VisMode::Spectrogram,
+            "lissajous" => VisMode::Lissajous,
+            "spectrum-3d" => VisMode::Spectrum3D,
+            "cassette" => VisMode::Cassette,
+            _ => return None,
+        })
+    }
 }
 
 pub struct Visualizer {

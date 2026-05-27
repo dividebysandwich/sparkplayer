@@ -1,8 +1,10 @@
 mod app;
 mod audio;
+mod config;
 mod library;
 mod metadata;
 mod subtitles;
+mod theme;
 mod ui;
 mod video;
 mod visualizer;
@@ -84,7 +86,8 @@ fn main() -> Result<()> {
             .unwrap_or_else(library::default_music_dir)
     };
 
-    let mut app = App::new(tracks, initial_dir, cli.graphics.into())?;
+    let cfg = config::load();
+    let mut app = App::new(tracks, initial_dir, cli.graphics.into(), &cfg)?;
 
     let mut terminal = setup_terminal().context("setting up terminal")?;
     // Picker queries the terminal — must happen after raw mode is enabled
@@ -167,7 +170,8 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<()> {
         KeyCode::Char(' ') => app.player.toggle_pause(),
         KeyCode::Char('n') => app.next_track()?,
         KeyCode::Char('p') => app.prev_track()?,
-        KeyCode::Char('v') => app.visualizer.toggle_mode(),
+        KeyCode::Char('v') => app.cycle_visualizer(),
+        KeyCode::Char('t') => app.cycle_theme(),
         KeyCode::Char('f') => app.fullscreen_vis = !app.fullscreen_vis,
         KeyCode::Char('r') => app.cycle_repeat(),
         KeyCode::Char('s') => app.toggle_shuffle(),

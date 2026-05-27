@@ -12,16 +12,35 @@ use ratatui::widgets::{
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, FocusPane};
+use crate::theme;
 use crate::visualizer::VisMode;
 
-const NEON_PINK: Color = Color::Rgb(255, 89, 194);
-const NEON_CYAN: Color = Color::Rgb(0, 229, 255);
-const NEON_PURPLE: Color = Color::Rgb(170, 102, 255);
-const NEON_YELLOW: Color = Color::Rgb(255, 217, 102);
-const NEON_GREEN: Color = Color::Rgb(102, 255, 178);
-const NEON_RED: Color = Color::Rgb(255, 90, 120);
-const DIM_TEXT: Color = Color::Rgb(180, 180, 200);
-const BG_PANEL: Color = Color::Rgb(20, 20, 35);
+// Palette accessors — every call reads the active theme from a thread-local,
+// so swapping themes at runtime instantly recolors every redraw.
+fn pink() -> Color {
+    theme::current().primary
+}
+fn cyan() -> Color {
+    theme::current().accent
+}
+fn purple() -> Color {
+    theme::current().secondary
+}
+fn yellow() -> Color {
+    theme::current().highlight
+}
+fn green() -> Color {
+    theme::current().ok
+}
+fn red() -> Color {
+    theme::current().warn
+}
+fn dim() -> Color {
+    theme::current().dim
+}
+fn panel_bg() -> Color {
+    theme::current().bg
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -102,7 +121,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == FocusPane::Playlist;
-    let border = if focused { NEON_PINK } else { NEON_PURPLE };
+    let border = if focused { pink() } else { purple() };
 
     let items: Vec<ListItem> = app
         .tracks
@@ -113,13 +132,13 @@ fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
             let prefix = if playing { "▶ " } else { "  " };
             let style = if playing {
                 Style::default()
-                    .fg(NEON_YELLOW)
+                    .fg(yellow())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Rgb(220, 220, 240))
             };
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(NEON_CYAN)),
+                Span::styled(prefix, Style::default().fg(cyan())),
                 Span::styled(t.display.clone(), style),
             ]))
         })
@@ -133,14 +152,14 @@ fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
                 .border_style(Style::default().fg(border))
                 .title(Line::from(Span::styled(
                     title,
-                    Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD),
+                    Style::default().fg(pink()).add_modifier(Modifier::BOLD),
                 )))
-                .style(Style::default().bg(BG_PANEL)),
+                .style(Style::default().bg(panel_bg())),
         )
         .highlight_style(
             Style::default()
                 .bg(Color::Rgb(70, 35, 90))
-                .fg(NEON_CYAN)
+                .fg(cyan())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("➤ ");
@@ -150,7 +169,7 @@ fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == FocusPane::Browser;
-    let border = if focused { NEON_PINK } else { NEON_PURPLE };
+    let border = if focused { pink() } else { purple() };
     let cwd = app.browser_dir.display().to_string();
     let has_parent = app.browser_dir.parent().is_some();
 
@@ -178,7 +197,7 @@ fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
                 )
             };
             let style = if p.is_dir() || parent {
-                Style::default().fg(NEON_CYAN)
+                Style::default().fg(cyan())
             } else {
                 Style::default().fg(Color::Rgb(220, 220, 240))
             };
@@ -194,15 +213,15 @@ fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
                 .title(Line::from(Span::styled(
                     format!(" 📂 {} ", truncate_path(&cwd, area.width as usize)),
                     Style::default()
-                        .fg(NEON_CYAN)
+                        .fg(cyan())
                         .add_modifier(Modifier::BOLD),
                 )))
-                .style(Style::default().bg(BG_PANEL)),
+                .style(Style::default().bg(panel_bg())),
         )
         .highlight_style(
             Style::default()
                 .bg(Color::Rgb(30, 60, 80))
-                .fg(NEON_YELLOW)
+                .fg(yellow())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("➤ ");
@@ -263,40 +282,40 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(NEON_PURPLE))
+        .border_style(Style::default().fg(purple()))
         .title(Line::from(Span::styled(
             " Now Playing ",
-            Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD),
+            Style::default().fg(pink()).add_modifier(Modifier::BOLD),
         )))
         .title(
             Line::from(vec![
                 Span::styled(
                     " ✦ ",
                     Style::default()
-                        .fg(NEON_YELLOW)
+                        .fg(yellow())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     "Spark",
                     Style::default()
-                        .fg(NEON_PINK)
+                        .fg(pink())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     "Player ",
                     Style::default()
-                        .fg(NEON_CYAN)
+                        .fg(cyan())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("v{} ", env!("CARGO_PKG_VERSION")),
-                    Style::default().fg(DIM_TEXT),
+                    Style::default().fg(dim()),
                 ),
             ])
             .alignment(Alignment::Right),
         )
         .padding(Padding::new(1, 1, 0, 0))
-        .style(Style::default().bg(BG_PANEL));
+        .style(Style::default().bg(panel_bg()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -310,35 +329,35 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled(
                 "  TITLE  ",
-                Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD),
+                Style::default().fg(purple()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 title,
                 Style::default()
-                    .fg(NEON_YELLOW)
+                    .fg(yellow())
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 " ARTIST  ",
-                Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD),
+                Style::default().fg(purple()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(artist, Style::default().fg(NEON_PINK)),
+            Span::styled(artist, Style::default().fg(pink())),
         ]),
         Line::from(vec![
             Span::styled(
                 "  ALBUM  ",
-                Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD),
+                Style::default().fg(purple()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(album, Style::default().fg(NEON_CYAN)),
+            Span::styled(album, Style::default().fg(cyan())),
         ]),
         Line::from(vec![
             Span::styled(
                 "  INFO   ",
-                Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD),
+                Style::default().fg(purple()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format_format_line(app), Style::default().fg(DIM_TEXT)),
+            Span::styled(format_format_line(app), Style::default().fg(dim())),
         ]),
     ];
 
@@ -376,7 +395,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(NEON_PINK).bg(Color::Rgb(50, 30, 70)))
+        .gauge_style(Style::default().fg(pink()).bg(Color::Rgb(50, 30, 70)))
         .ratio(ratio)
         .label(Span::styled(
             label,
@@ -398,21 +417,21 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
             mode_label,
             Style::default()
                 .fg(Color::Black)
-                .bg(NEON_GREEN)
+                .bg(green())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" Repeat: {} ", app.repeat.label()),
             Style::default()
                 .fg(Color::Black)
-                .bg(NEON_YELLOW)
+                .bg(yellow())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" Shuffle: {} ", if app.shuffle { "On" } else { "Off" }),
             Style::default()
                 .fg(Color::Black)
-                .bg(NEON_PINK)
+                .bg(pink())
                 .add_modifier(Modifier::BOLD),
         ),
     ];
@@ -426,7 +445,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Style::default()
                 .fg(Color::Black)
-                .bg(NEON_CYAN)
+                .bg(cyan())
                 .add_modifier(Modifier::BOLD),
         ));
         if app.subtitles.track_count() > 0 {
@@ -441,7 +460,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 format!(" Subs: {} ", sub_state),
                 Style::default()
                     .fg(Color::Black)
-                    .bg(NEON_PURPLE)
+                    .bg(purple())
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -472,7 +491,7 @@ fn draw_volume_column(frame: &mut Frame, area: Rect, volume: f32) {
         Paragraph::new(Line::from(Span::styled(
             "VOL",
             Style::default()
-                .fg(NEON_CYAN)
+                .fg(cyan())
                 .add_modifier(Modifier::BOLD),
         )))
         .alignment(Alignment::Center),
@@ -482,7 +501,7 @@ fn draw_volume_column(frame: &mut Frame, area: Rect, volume: f32) {
         Paragraph::new(Line::from(Span::styled(
             format!("{:>3}%", pct),
             Style::default()
-                .fg(if volume > 1.0 { NEON_RED } else { NEON_YELLOW })
+                .fg(if volume > 1.0 { red() } else { yellow() })
                 .add_modifier(Modifier::BOLD),
         )))
         .alignment(Alignment::Center),
@@ -517,7 +536,7 @@ fn draw_vertical_bar(frame: &mut Frame, area: Rect, volume: f32) {
             if row < full_cells {
                 cell.set_char('█');
                 cell.set_fg(color);
-                cell.set_bg(BG_PANEL);
+                cell.set_bg(panel_bg());
             } else if row == full_cells && frac > 0 {
                 let ch = match frac {
                     1 => '▁',
@@ -531,11 +550,11 @@ fn draw_vertical_bar(frame: &mut Frame, area: Rect, volume: f32) {
                 };
                 cell.set_char(ch);
                 cell.set_fg(color);
-                cell.set_bg(BG_PANEL);
+                cell.set_bg(panel_bg());
             } else {
                 cell.set_char('░');
                 cell.set_fg(Color::Rgb(60, 40, 80));
-                cell.set_bg(BG_PANEL);
+                cell.set_bg(panel_bg());
             }
         }
     }
@@ -545,11 +564,11 @@ fn volume_color(row: usize, h: usize) -> Color {
     // green low → yellow → pink → red at the very top (over-100%).
     let t = if h == 0 { 0.0 } else { row as f32 / h as f32 };
     if t < 0.45 {
-        lerp(NEON_GREEN, NEON_YELLOW, t / 0.45)
+        lerp(green(), yellow(), t / 0.45)
     } else if t < 0.75 {
-        lerp(NEON_YELLOW, NEON_PINK, (t - 0.45) / 0.30)
+        lerp(yellow(), pink(), (t - 0.45) / 0.30)
     } else {
-        lerp(NEON_PINK, NEON_RED, (t - 0.75) / 0.25)
+        lerp(pink(), red(), (t - 0.75) / 0.25)
     }
 }
 
@@ -578,14 +597,14 @@ fn format_format_line(app: &App) -> String {
 fn draw_album_art(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(NEON_PURPLE))
+        .border_style(Style::default().fg(purple()))
         .title(Line::from(Span::styled(
             " Album Art ",
             Style::default()
-                .fg(NEON_YELLOW)
+                .fg(yellow())
                 .add_modifier(Modifier::BOLD),
         )))
-        .style(Style::default().bg(BG_PANEL));
+        .style(Style::default().bg(panel_bg()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -635,12 +654,12 @@ fn draw_album_art(frame: &mut Frame, area: Rect, app: &mut App) {
 fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(NEON_PURPLE))
+        .border_style(Style::default().fg(purple()))
         .title(Line::from(Span::styled(
             " Video ",
-            Style::default().fg(NEON_YELLOW).add_modifier(Modifier::BOLD),
+            Style::default().fg(yellow()).add_modifier(Modifier::BOLD),
         )))
-        .style(Style::default().bg(BG_PANEL));
+        .style(Style::default().bg(panel_bg()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -810,14 +829,14 @@ fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = format!(" Visualizer — {} ", mode.label());
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(NEON_PURPLE))
+        .border_style(Style::default().fg(purple()))
         .title(Line::from(Span::styled(
             title,
             Style::default()
-                .fg(NEON_CYAN)
+                .fg(cyan())
                 .add_modifier(Modifier::BOLD),
         )))
-        .style(Style::default().bg(BG_PANEL));
+        .style(Style::default().bg(panel_bg()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -864,7 +883,7 @@ fn draw_spectrum(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char('█');
                     cell.set_fg(color);
-                    cell.set_bg(BG_PANEL);
+                    cell.set_bg(panel_bg());
                 }
             } else if row == full_cells && frac_eighths > 0 {
                 let ch = match frac_eighths {
@@ -880,7 +899,7 @@ fn draw_spectrum(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     cell.set_fg(color);
-                    cell.set_bg(BG_PANEL);
+                    cell.set_bg(panel_bg());
                 }
             }
         }
@@ -889,15 +908,15 @@ fn draw_spectrum(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
 
 fn bar_color(row: usize, h: usize) -> Color {
     if h == 0 {
-        return NEON_GREEN;
+        return green();
     }
     let t = row as f32 / h as f32;
     if t < 0.4 {
-        lerp(NEON_GREEN, NEON_YELLOW, t / 0.4)
+        lerp(green(), yellow(), t / 0.4)
     } else if t < 0.75 {
-        lerp(NEON_YELLOW, NEON_PINK, (t - 0.4) / 0.35)
+        lerp(yellow(), pink(), (t - 0.4) / 0.35)
     } else {
-        lerp(NEON_PINK, NEON_PURPLE, (t - 0.75) / 0.25)
+        lerp(pink(), purple(), (t - 0.75) / 0.25)
     }
 }
 
@@ -935,25 +954,25 @@ fn draw_amplitude_strip(frame: &mut Frame, area: Rect, points: &[f32], w: usize,
         if let Some(cell) = buf.cell_mut((area.x + x as u16, area.y + mid as u16)) {
             cell.set_char('·');
             cell.set_fg(Color::Rgb(60, 60, 90));
-            cell.set_bg(BG_PANEL);
+            cell.set_bg(panel_bg());
         }
     }
     for (i, p) in points.iter().enumerate() {
         let amp = (*p * mid as f32) as usize;
         let amp = amp.min(mid);
         for d in 0..=amp {
-            let color = lerp(NEON_CYAN, NEON_PINK, d as f32 / mid.max(1) as f32);
+            let color = lerp(cyan(), pink(), d as f32 / mid.max(1) as f32);
             let yu = mid.saturating_sub(d);
             let yd = (mid + d).min(h - 1);
             if let Some(cell) = buf.cell_mut((area.x + i as u16, area.y + yu as u16)) {
                 cell.set_char(if d == amp { '▀' } else { '█' });
                 cell.set_fg(color);
-                cell.set_bg(BG_PANEL);
+                cell.set_bg(panel_bg());
             }
             if let Some(cell) = buf.cell_mut((area.x + i as u16, area.y + yd as u16)) {
                 cell.set_char(if d == amp { '▄' } else { '█' });
                 cell.set_fg(color);
-                cell.set_bg(BG_PANEL);
+                cell.set_bg(panel_bg());
             }
         }
     }
@@ -974,7 +993,7 @@ fn draw_scrolling_waveform(frame: &mut Frame, area: Rect, app: &mut App, active:
     let y_max = 1.05f64;
     let canvas = Canvas::default()
         .marker(Marker::Braille)
-        .background_color(BG_PANEL)
+        .background_color(panel_bg())
         .x_bounds([0.0, dots as f64])
         .y_bounds([-y_max, y_max])
         .paint(move |ctx| {
@@ -992,7 +1011,7 @@ fn draw_scrolling_waveform(frame: &mut Frame, area: Rect, app: &mut App, active:
                 if pv < 1e-4 {
                     continue;
                 }
-                let color = lerp(NEON_CYAN, NEON_PINK, *p);
+                let color = lerp(cyan(), pink(), *p);
                 ctx.draw(&CanvasLine {
                     x1: i as f64,
                     y1: -pv,
@@ -1030,7 +1049,7 @@ fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char('█');
                 cell.set_fg(color);
-                cell.set_bg(BG_PANEL);
+                cell.set_bg(panel_bg());
             }
         }
     }
@@ -1053,7 +1072,7 @@ fn draw_lissajous(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w_unit = h_unit * (w as f64 / h as f64) / cell_aspect;
     let canvas = Canvas::default()
         .marker(Marker::Braille)
-        .background_color(BG_PANEL)
+        .background_color(panel_bg())
         .x_bounds([-w_unit, w_unit])
         .y_bounds([-h_unit, h_unit])
         .paint(move |ctx| {
@@ -1110,7 +1129,7 @@ fn draw_lissajous(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
                 let (x1, y1) = (w[0].0 as f64, w[0].1 as f64);
                 let (x2, y2) = (w[1].0 as f64, w[1].1 as f64);
                 let r = ((x1 * x1 + y1 * y1).sqrt()).min(1.0) as f32;
-                let color = lerp(NEON_CYAN, NEON_PINK, r);
+                let color = lerp(cyan(), pink(), r);
                 ctx.draw(&CanvasLine {
                     x1,
                     y1,
@@ -1154,7 +1173,7 @@ fn draw_spectrum_3d(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
 
     let canvas = Canvas::default()
         .marker(Marker::Braille)
-        .background_color(BG_PANEL)
+        .background_color(panel_bg())
         .x_bounds([0.0, total_x])
         .y_bounds([0.0, 1.0])
         .paint(move |ctx| {
@@ -1697,11 +1716,11 @@ fn draw_cassette(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let body = Rect::new(x, y, w, h);
 
     let case_color = Color::Rgb(35, 28, 55);
-    let case_trim = NEON_CYAN;
+    let case_trim = cyan();
     let label_bg = Color::Rgb(245, 230, 195);
     let label_text = Color::Rgb(35, 25, 60);
     let label_meta = Color::Rgb(170, 90, 70);
-    let label_border = NEON_PINK;
+    let label_border = pink();
     let screw_color = Color::Rgb(110, 95, 130);
     let tape_color = Color::Rgb(150, 110, 70);
     let window_frame = Color::Rgb(120, 110, 150);
@@ -2046,7 +2065,7 @@ fn draw_cassette(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
                 // Hub gear: spoked wheel that grabs the spool — this is the
                 // rotation the user actually reads.
                 let hub_r = 0.30;
-                circle(ctx, hub_r, NEON_YELLOW);
+                circle(ctx, hub_r, yellow());
                 let spokes = 6;
                 for s in 0..spokes {
                     let a = phase_d + (s as f64 / spokes as f64) * std::f64::consts::TAU;
@@ -2055,12 +2074,12 @@ fn draw_cassette(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
                         y1: -a.sin() * hub_r * 0.2,
                         x2: a.cos() * 0.72,
                         y2: a.sin() * 0.72,
-                        color: NEON_CYAN,
+                        color: cyan(),
                     });
                 }
                 // Center peg.
                 circle(ctx, 0.10, Color::Rgb(40, 30, 60));
-                circle(ctx, 0.05, NEON_PINK);
+                circle(ctx, 0.05, pink());
             });
         frame.render_widget(canvas, rect);
     }
@@ -2126,8 +2145,8 @@ fn write_label_centered(
 fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(NEON_PURPLE))
-        .style(Style::default().bg(BG_PANEL));
+        .border_style(Style::default().fg(purple()))
+        .style(Style::default().bg(panel_bg()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2136,21 +2155,22 @@ fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
             format!(" {k} "),
             Style::default()
                 .fg(Color::Black)
-                .bg(NEON_CYAN)
+                .bg(cyan())
                 .add_modifier(Modifier::BOLD),
         )
     };
-    let lbl = |s: &str| Span::styled(format!(" {s}  "), Style::default().fg(DIM_TEXT));
+    let lbl = |s: &str| Span::styled(format!(" {s}  "), Style::default().fg(dim()));
 
     // Priority-ordered: most important first. We drop entries from the end
     // when the bar wouldn't fit the available width.
-    let entries: [(&str, &str); 14] = [
+    let entries: [(&str, &str); 15] = [
         ("?", "Help"),
         ("←→", "Seek 10s"),
         ("Tab", "Focus"),
         ("Space", "Play/Pause"),
         ("+/-", "Volume"),
         ("v", "Visualizer"),
+        ("t", "Theme"),
         ("f", "Fullscreen"),
         ("n", "Next"),
         ("p", "Prev"),
@@ -2188,11 +2208,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(pink()).add_modifier(Modifier::BOLD))
         .title(Line::from(Span::styled(
             " ✦ SparkPlayer Help ",
             Style::default()
-                .fg(NEON_YELLOW)
+                .fg(yellow())
                 .add_modifier(Modifier::BOLD),
         )))
         .padding(Padding::new(2, 2, 1, 1))
@@ -2201,7 +2221,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     let body = vec![
         Line::from(Span::styled(
             "Playback",
-            Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
         )),
         Line::from("  Space          play / pause"),
         Line::from("  n / p          next / previous track"),
@@ -2214,7 +2234,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "Navigation",
-            Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
         )),
         Line::from("  ↑ / ↓          move selection"),
         Line::from("  PgUp / PgDn    page selection"),
@@ -2223,19 +2243,20 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "Modes",
-            Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
         )),
         Line::from("  v              cycle visualizer:"),
         Line::from("                  FFT bars → waveform → scrolling →"),
         Line::from("                  spectrogram → stereo X/Y →"),
         Line::from("                  spectrum 3D → cassette tape"),
+        Line::from("  t              cycle color theme"),
         Line::from("  f              toggle fullscreen visualizer"),
         Line::from("  r              cycle repeat (off / all / one)"),
         Line::from("  s              shuffle remaining tracks"),
         Line::from(""),
         Line::from(Span::styled(
             "Playlist",
-            Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
         )),
         Line::from("  a              queue the highlighted browser item"),
         Line::from("  Shift+A        queue every audio file under the current dir"),
