@@ -8,6 +8,7 @@ use ratatui_image::protocol::StatefulProtocol;
 
 use crate::audio::AudioPlayer;
 use crate::config;
+use crate::external_window::ExternalVideoWindow;
 use crate::library::{self, Track};
 use crate::metadata::{self, TrackMeta};
 use crate::subtitles::{self, SubtitleSet};
@@ -75,6 +76,7 @@ pub enum EscapeMenuKind {
     Visualizer,
     Theme,
     Fullscreen,
+    VideoWindow,
     Repeat,
     Shuffle,
     Separator,
@@ -159,6 +161,8 @@ pub struct App {
     pub show_escape_menu: bool,
     pub escape_menu_selected: usize,
     pub fullscreen_vis: bool,
+    pub external_window: Option<ExternalVideoWindow>,
+    pub external_window_enabled: bool,
 
     pub theme: Theme,
 
@@ -224,6 +228,8 @@ impl App {
             show_escape_menu: false,
             escape_menu_selected: 0,
             fullscreen_vis: false,
+            external_window: None,
+            external_window_enabled: false,
             theme,
             graphics_choice,
         };
@@ -414,6 +420,7 @@ impl App {
         self.video = None;
         self.video_protocol = None;
         self.video_dims = None;
+        self.external_window = None;
         self.subtitles.cancel();
         self.subtitles = SubtitleSet::default();
         self.active_subtitle_track = None;
@@ -441,6 +448,9 @@ impl App {
                         Ok(v) => {
                             self.video_dims = Some((v.width, v.height));
                             self.video = Some(v);
+                            if self.external_window_enabled {
+                                self.spawn_external_window();
+                            }
                         }
                         Err(e) => {
                             self.status = format!("Video decode error: {e}");
@@ -481,9 +491,23 @@ impl App {
             self.subtitle_announcement_until = Some(Instant::now() + Duration::from_secs(5));
         }
         self.last_subtitle_track_count = count;
+        // Drop the external window if it died (close button, init failure).
+        if self.external_window.as_ref().is_some_and(|w| !w.is_alive()) {
+            self.external_window = None;
+            self.external_window_enabled = false;
+        }
         let Some(frame) = video.frame_at(pos) else {
             return;
         };
+        // If the SDL window is up, render there exclusively — the in-terminal
+        // image path is expensive and pointless when the user has the
+        // dedicated playback window in focus.
+        if let Some(window) = self.external_window.as_ref() {
+            self.video_dims = Some((frame.width, frame.height));
+            self.video_protocol = None;
+            window.submit_frame(frame);
+            return;
+        }
         let Some(picker) = self.picker.as_mut() else {
             return;
         };
@@ -663,6 +687,7 @@ impl App {
         self.video = None;
         self.video_protocol = None;
         self.video_dims = None;
+        self.external_window = None;
         self.status = String::from("Playlist cleared");
     }
 
@@ -871,6 +896,86 @@ impl App {
         self.fullscreen_vis = !self.fullscreen_vis;
     }
 
+    /// Cycle the display mode: Normal → in-terminal Fullscreen → external
+    /// Video Window → Normal. Bound to `f`.
+    pub fn cycle_display_mode(&mut self) {
+        if self.external_window_enabled {
+            // Video Window → Normal
+            self.external_window_enabled = false;
+            self.external_window = None;
+            self.fullscreen_vis = false;
+            self.status = String::from("Display: normal");
+        } else if self.fullscreen_vis {
+            // Fullscreen → Video Window
+            self.fullscreen_vis = false;
+            self.external_window_enabled = true;
+            if self.video.is_some() {
+                self.spawn_external_window();
+            } else {
+                self.status = String::from(
+                    "Display: video window (armed — opens on next video)",
+                );
+            }
+        } else {
+            // Normal → Fullscreen
+            self.fullscreen_vis = true;
+            self.status = String::from("Display: fullscreen");
+        }
+    }
+
+    /// Open a dedicated SDL window for fullscreen video playback. No-op if the
+    /// window is already up or no video is loaded.
+    fn spawn_external_window(&mut self) {
+        if self.external_window.is_some() || self.video.is_none() {
+            return;
+        }
+        match ExternalVideoWindow::spawn() {
+            Ok(w) => {
+                self.external_window = Some(w);
+                // Stop rendering the terminal video tile — frames go to SDL now.
+                self.video_protocol = None;
+                self.status = String::from("Video window: opened");
+            }
+            Err(e) => {
+                self.external_window_enabled = false;
+                self.status = format!("Video window error: {e}");
+            }
+        }
+    }
+
+    /// Flip the dedicated-window option from the escape menu. Spawning happens
+    /// immediately if a video is loaded; otherwise the flag persists and the
+    /// window opens the next time a video starts.
+    pub fn toggle_video_window(&mut self) {
+        self.external_window_enabled = !self.external_window_enabled;
+        if self.external_window_enabled {
+            if self.video.is_some() {
+                self.spawn_external_window();
+            } else {
+                self.status = String::from(
+                    "Video window: armed — opens when next video plays",
+                );
+            }
+        } else {
+            self.external_window = None;
+            self.status = String::from("Video window: closed");
+        }
+    }
+
+    /// Drain queued keyboard events from the external playback window so the
+    /// main run loop can dispatch them through the regular handler. Returns
+    /// pairs of `(KeyCode, KeyModifiers)`.
+    pub fn drain_external_keys(&self) -> Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
+        let Some(window) = self.external_window.as_ref() else {
+            return Vec::new();
+        };
+        window
+            .drain_keys()
+            .into_iter()
+            .map(|k| (k.code, k.mods))
+            .collect()
+    }
+
     /// Build the list of menu rows. Rows whose preconditions aren't met (e.g.
     /// subtitles when no video is playing) are returned with `enabled = false`
     /// so the renderer dims them and the key handler skips over them.
@@ -932,6 +1037,13 @@ impl App {
                 enabled: true,
                 label: "Fullscreen",
                 value: if self.fullscreen_vis { "On" } else { "Off" }.to_string(),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::VideoWindow,
+                enabled: true,
+                label: "Video Window",
+                value: if self.external_window_enabled { "On" } else { "Off" }
+                    .to_string(),
             },
             EscapeMenuItem {
                 kind: EscapeMenuKind::Repeat,
@@ -1023,6 +1135,7 @@ impl App {
                 }
             }
             EscapeMenuKind::Fullscreen => self.toggle_fullscreen(),
+            EscapeMenuKind::VideoWindow => self.toggle_video_window(),
             EscapeMenuKind::Repeat => self.cycle_repeat(),
             EscapeMenuKind::Shuffle => self.toggle_shuffle(),
             EscapeMenuKind::Quit | EscapeMenuKind::Separator => {}
@@ -1046,6 +1159,7 @@ impl App {
                 return Ok(true);
             }
             EscapeMenuKind::Fullscreen => self.toggle_fullscreen(),
+            EscapeMenuKind::VideoWindow => self.toggle_video_window(),
             EscapeMenuKind::Repeat => self.cycle_repeat(),
             EscapeMenuKind::Shuffle => self.toggle_shuffle(),
             // For A/V offset, Enter resets to Auto.

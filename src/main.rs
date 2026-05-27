@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod config;
+mod external_window;
 mod library;
 mod metadata;
 mod subtitles;
@@ -140,6 +141,12 @@ fn run_loop(
             }
         }
 
+        // Forward keystrokes captured by the SDL playback window so the same
+        // shortcuts work regardless of which window has focus.
+        for (code, mods) in app.drain_external_keys() {
+            handle_key(app, code, mods)?;
+        }
+
         if last_tick.elapsed() >= frame_dur {
             app.check_advance()?;
             app.tick_video();
@@ -195,7 +202,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<()> {
         KeyCode::Char('p') => app.prev_track()?,
         KeyCode::Char('v') => app.cycle_visualizer(),
         KeyCode::Char('t') => app.cycle_theme(),
-        KeyCode::Char('f') => app.fullscreen_vis = !app.fullscreen_vis,
+        KeyCode::Char('f') => app.cycle_display_mode(),
         KeyCode::Char('r') => app.cycle_repeat(),
         KeyCode::Char('s') => app.toggle_shuffle(),
         KeyCode::Char('a') => app.queue_selected_browser(),

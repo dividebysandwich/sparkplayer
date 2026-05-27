@@ -26,6 +26,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
 walkdir = "2"
 ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
+sdl2 = { version = "0.38", default-features = false }
 
 [profile.release]
 opt-level = 3
@@ -34,7 +35,7 @@ lto = "thin"
 [package.metadata.deb]
 section = "sound"
 priority = "optional"
-depends = "libasound2, libavcodec60 | libavcodec59, libavformat60 | libavformat59, libavutil58 | libavutil57, libswresample4, libswscale7 | libswscale6"
+depends = "libasound2, libavcodec60 | libavcodec59, libavformat60 | libavformat59, libavutil58 | libavutil57, libswresample4, libswscale7 | libswscale6, libsdl2-2.0-0"
 extended-description = """\
 SparkPlayer is a lightweight terminal media player.
 It supports MP3, WAV, OGG, FLAC, M4A, AAC, Opus and WMA audio plus

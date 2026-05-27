@@ -2256,7 +2256,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("                  spectrogram → stereo X/Y →"),
         Line::from("                  spectrum 3D → cassette tape"),
         Line::from("  t              cycle color theme"),
-        Line::from("  f              toggle fullscreen visualizer"),
+        Line::from("  f              cycle display: normal → fullscreen → video window"),
         Line::from("  r              cycle repeat (off / all / one)"),
         Line::from("  s              shuffle remaining tracks"),
         Line::from(""),
