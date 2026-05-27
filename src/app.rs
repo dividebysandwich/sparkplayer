@@ -505,6 +505,7 @@ impl App {
         if let Some(window) = self.external_window.as_ref() {
             self.video_dims = Some((frame.width, frame.height));
             self.video_protocol = None;
+            window.set_subtitle(self.current_subtitle_text.clone());
             window.submit_frame(frame);
             return;
         }

@@ -27,6 +27,7 @@ ratatui-image = { version = "11", default-features = false, features = ["crosste
 walkdir = "2"
 ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
 sdl2 = { version = "0.38", default-features = false }
+ab_glyph = "0.2"
 
 [profile.release]
 opt-level = 3
