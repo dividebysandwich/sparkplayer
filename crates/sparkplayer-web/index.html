@@ -6,13 +6,26 @@
     <title>SparkPlayer</title>
     <link data-trunk rel="rust" data-wasm-opt="z" />
     <link data-trunk rel="copy-file" href="manifest.json" />
+    <link
+      data-trunk
+      rel="copy-file"
+      href="assets/MesloLGMNerdFontMono-Regular.woff2"
+    />
     <style>
+      @font-face {
+        font-family: "MesloLGM Nerd Font Mono";
+        src: url("MesloLGMNerdFontMono-Regular.woff2") format("woff2");
+        font-display: swap;
+      }
       html,
       body {
         margin: 0;
         height: 100%;
         background: #141423;
         overflow: hidden;
+        /* Used on the page so the browser actually downloads the webfont — a
+           canvas alone won't trigger the load. */
+        font-family: "MesloLGM Nerd Font Mono", monospace;
       }
       /* Ratzilla mounts its cell grid inside this element; overlays are sized
          relative to it. */
@@ -22,23 +35,50 @@
         height: 100vh;
         overflow: hidden;
       }
+      /* The canvas backend draws into a single <canvas> that fills the root. */
+      #sparkplayer-root canvas {
+        display: block;
+      }
+      /* Positioned over the (empty) browser panel by the WASM each frame. */
       #toolbar {
         position: fixed;
-        top: 4px;
-        right: 8px;
-        z-index: 20;
-        font-family: monospace;
-        color: #e0e0f0;
+        z-index: 15;
+        display: none;
+        flex-direction: column;
+        justify-content: center;
+        align-items: stretch;
+        gap: 14px;
+        padding: 18px;
+        box-sizing: border-box;
       }
-      #file-input {
+      #toolbar .btn {
+        font-family: "MesloLGM Nerd Font Mono", monospace;
+        font-size: 18px;
         color: #e0e0f0;
+        background: rgba(40, 30, 60, 0.85);
+        border: 1px solid #aa66ff;
+        border-radius: 6px;
+        padding: 16px 12px;
+        text-align: center;
+        cursor: pointer;
+        user-select: none;
+      }
+      #toolbar .btn:hover {
+        background: rgba(70, 40, 100, 0.95);
+        border-color: #ff59c2;
       }
     </style>
   </head>
   <body>
     <div id="toolbar">
-      <label for="file-input">Open local files:</label>
-      <input id="file-input" type="file" accept="audio/*,video/*" multiple />
+      <label class="btn">
+        <input id="file-input" type="file" accept="audio/*,video/*" multiple hidden />
+        ♪ Open files
+      </label>
+      <label class="btn">
+        <input id="dir-input" type="file" webkitdirectory multiple hidden />
+        📁 Open folder
+      </label>
     </div>
     <div id="sparkplayer-root"></div>
   </body>

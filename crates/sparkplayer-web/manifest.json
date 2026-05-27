@@ -1,4 +1,10 @@
 {
-  "_comment": "Web-playlist mode: list hosted media here and SparkPlayer plays them on load. Leave `tracks` empty to start in local-file mode (use the file picker). Hosted media must send permissive CORS headers, or the visualizer reads silence.",
+  "_comment": "Web-playlist mode: list hosted media here and SparkPlayer plays them on load. Each track takes `url` (required), `title`, and optional `artwork` (cover image URL) and `subtitles` (a .vtt URL). Leave `tracks` empty to start in local-file mode (use the file picker). Hosted media must send permissive CORS headers, or the visualizer reads silence.",
+  "_example": {
+    "url": "https://host/song.mp3",
+    "title": "Song Title",
+    "artwork": "https://host/cover.jpg",
+    "subtitles": "https://host/song.en.vtt"
+  },
   "tracks": []
 }

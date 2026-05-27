@@ -62,6 +62,9 @@ pub(super) fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 pub(super) fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Record the panel rect so the web build can float the file-picker buttons
+    // over it (the browser pane is empty in the browser).
+    app.last_browser_rect = Some(area);
     let focused = app.focus == FocusPane::Browser;
     let border = if focused { pink() } else { purple() };
     let cwd = app.browser_dir.display().to_string();

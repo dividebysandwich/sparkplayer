@@ -53,10 +53,11 @@ cargo install --path crates/sparkplayer-native
 ## Browser build (WASM)
 
 SparkPlayer also runs in the browser, rendered with
-[Ratzilla](https://github.com/ratatui/ratzilla). Audio plays through the Web
-Audio API (with the visualizer tapping the analyser), and video is shown via a
-real `<video>` element floated over the terminal grid. No FFmpeg/SDL/ALSA — the
-browser does the decoding.
+[Ratzilla](https://github.com/ratatui/ratzilla) on a canvas (fixed-cell grid),
+using a bundled [Meslo Nerd Font Mono](https://github.com/ryanoasis/nerd-fonts)
+webfont. Audio plays through the Web Audio API (with the visualizer tapping the
+analyser), and video is shown via a real `<video>` element floated over the
+terminal grid. No FFmpeg/SDL/ALSA — the browser does the decoding.
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -70,11 +71,15 @@ It chooses its media source at startup from `manifest.json` (served next to the
 page):
 
 - **Web-playlist mode** — if `manifest.json` lists `tracks`, they are loaded and
-  played: `{ "tracks": [ { "url": "https://host/song.mp3", "title": "Song" } ] }`.
+  played. Each entry takes a `url` (required) plus optional `title`, `artwork`
+  (cover image URL) and `subtitles` (a `.vtt` URL):
+  `{ "tracks": [ { "url": "https://host/song.mp3", "title": "Song", "artwork": "https://host/cover.jpg", "subtitles": "https://host/song.en.vtt" } ] }`.
   Hosted media must send permissive CORS headers (the player loads media with
   `crossorigin="anonymous"`), otherwise the visualizer's analyser reads silence.
 - **Local-file mode** — if `tracks` is empty, use the file picker at the top of
-  the page to play files from your PC.
+  the page to play files from your PC. Picked files have their tags and embedded
+  cover art parsed in-browser (via `lofty`), so title/artist/album and album art
+  show just like the native build.
 
 Browsers require a user gesture before audio can start, so the first keypress (or
 file pick) begins playback.

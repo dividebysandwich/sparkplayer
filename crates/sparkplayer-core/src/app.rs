@@ -145,9 +145,11 @@ pub struct App {
     pub clock_secs: f64,
 
     /// Layout rectangles recorded during the last `ui::draw`, used by the web
-    /// build to position the `<video>` / `<img>` overlays over the canvas.
+    /// build to position the `<video>` / `<img>` overlays and the file-picker
+    /// buttons over the canvas.
     pub last_video_rect: Option<Rect>,
     pub last_art_rect: Option<Rect>,
+    pub last_browser_rect: Option<Rect>,
 }
 
 impl App {
@@ -218,6 +220,7 @@ impl App {
             clock_secs: 0.0,
             last_video_rect: None,
             last_art_rect: None,
+            last_browser_rect: None,
         };
         app.refresh_browser();
         app

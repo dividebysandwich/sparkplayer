@@ -18,6 +18,9 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 anyhow = "1.0"
 console_error_panic_hook = "0.1"
+# Pure-Rust tag reader — parses picked local files' metadata + embedded cover
+# art from their bytes (works on wasm32; no filesystem needed).
+lofty = "0.24"
 
 [dependencies.web-sys]
 version = "0.3"
@@ -28,6 +31,8 @@ features = [
     "Node",
     "Performance",
     "HtmlElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
     "HtmlAudioElement",
     "HtmlVideoElement",
     "HtmlInputElement",

@@ -30,6 +30,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // where) image content is shown so the web build can position overlays.
     app.last_video_rect = None;
     app.last_art_rect = None;
+    app.last_browser_rect = None;
 
     let has_video = app.video.has_image();
 

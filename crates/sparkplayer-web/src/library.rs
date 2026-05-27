@@ -3,7 +3,10 @@
 //! or from user-picked local files (handled in `lib.rs`), so most of these
 //! methods are inert. Settings persist in `localStorage`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use web_sys::window;
 
@@ -15,7 +18,19 @@ use sparkplayer_core::subtitles::SubtitleSet;
 
 const STORAGE_KEY: &str = "sparkplayer";
 
-pub struct WebLibrary;
+/// Metadata parsed from picked local files (by locator/object-URL), shared with
+/// the file-input handler in `lib.rs` which fills it.
+pub type MetaMap = Rc<RefCell<HashMap<String, TrackMeta>>>;
+
+pub struct WebLibrary {
+    meta: MetaMap,
+}
+
+impl WebLibrary {
+    pub fn new(meta: MetaMap) -> Self {
+        Self { meta }
+    }
+}
 
 impl MediaLibrary for WebLibrary {
     fn browse(&self, _dir: &Path) -> Vec<PathBuf> {
@@ -30,11 +45,15 @@ impl MediaLibrary for WebLibrary {
         Vec::new()
     }
 
-    fn read_metadata(&self, _source: &TrackRef) -> TrackMeta {
-        // Titles/artists shown in the UI fall back to the Track's display name
-        // (set from the manifest or the picked file). The element learns its
-        // real duration asynchronously; `lib.rs` folds that into the App.
-        TrackMeta::default()
+    fn read_metadata(&self, source: &TrackRef) -> TrackMeta {
+        // Picked local files have their tags parsed up front (see `lib.rs`) and
+        // stashed here by locator; manifest tracks fall back to defaults (title
+        // comes from the Track's display name, duration from the media element).
+        self.meta
+            .borrow()
+            .get(&source.locator())
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn find_cover(&self, _source: &TrackRef) -> Option<Vec<u8>> {
