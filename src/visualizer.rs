@@ -42,6 +42,17 @@ impl VisMode {
             VisMode::Cassette => VisMode::Spectrum,
         }
     }
+    pub fn cycle_back(self) -> Self {
+        match self {
+            VisMode::Spectrum => VisMode::Cassette,
+            VisMode::Waveform => VisMode::Spectrum,
+            VisMode::ScrollingWaveform => VisMode::Waveform,
+            VisMode::Spectrogram => VisMode::ScrollingWaveform,
+            VisMode::Lissajous => VisMode::Spectrogram,
+            VisMode::Spectrum3D => VisMode::Lissajous,
+            VisMode::Cassette => VisMode::Spectrum3D,
+        }
+    }
     /// Stable identifier used in the persisted config file.
     pub fn name(&self) -> &'static str {
         match self {
@@ -398,5 +409,8 @@ impl Visualizer {
 
     pub fn toggle_mode(&mut self) {
         self.mode = self.mode.cycle();
+    }
+    pub fn toggle_mode_back(&mut self) {
+        self.mode = self.mode.cycle_back();
     }
 }

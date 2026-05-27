@@ -164,8 +164,31 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<()> {
         return Ok(());
     }
 
+    if app.show_escape_menu {
+        // Ctrl+C still escapes to quit even while the menu is open.
+        if matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL) {
+            app.should_quit = true;
+            return Ok(());
+        }
+        match code {
+            KeyCode::Esc => app.close_escape_menu(),
+            KeyCode::Up => app.escape_menu_move(-1),
+            KeyCode::Down => app.escape_menu_move(1),
+            KeyCode::Left => app.escape_menu_adjust(-1)?,
+            KeyCode::Right => app.escape_menu_adjust(1)?,
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if app.escape_menu_activate()? {
+                    app.close_escape_menu();
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Esc => app.open_escape_menu(),
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
         KeyCode::Char(' ') => app.player.toggle_pause(),
         KeyCode::Char('n') => app.next_track()?,

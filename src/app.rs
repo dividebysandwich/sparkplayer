@@ -68,6 +68,27 @@ impl GraphicsChoice {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum EscapeMenuKind {
+    Volume,
+    Subtitle,
+    AvOffset,
+    Visualizer,
+    Theme,
+    Fullscreen,
+    Repeat,
+    Shuffle,
+    Separator,
+    Quit,
+}
+
+pub struct EscapeMenuItem {
+    pub kind: EscapeMenuKind,
+    pub enabled: bool,
+    pub label: &'static str,
+    pub value: String,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RepeatMode {
     Off,
     All,
@@ -135,6 +156,8 @@ pub struct App {
 
     pub should_quit: bool,
     pub show_help: bool,
+    pub show_escape_menu: bool,
+    pub escape_menu_selected: usize,
     pub fullscreen_vis: bool,
 
     pub theme: Theme,
@@ -198,6 +221,8 @@ impl App {
             last_subtitle_track_count: 0,
             should_quit: false,
             show_help: false,
+            show_escape_menu: false,
+            escape_menu_selected: 0,
             fullscreen_vis: false,
             theme,
             graphics_choice,
@@ -781,12 +806,253 @@ impl App {
         self.save_config();
     }
 
+    pub fn cycle_visualizer_back(&mut self) {
+        self.visualizer.toggle_mode_back();
+        self.status = format!("Visualizer: {}", self.visualizer.mode.label());
+        self.save_config();
+    }
+
     pub fn cycle_theme(&mut self) {
         let next = theme::next_after(self.theme.name);
         self.theme = next;
         theme::set_current(next);
         self.status = format!("Theme: {}", next.label);
         self.save_config();
+    }
+
+    pub fn cycle_theme_back(&mut self) {
+        let prev = theme::prev_before(self.theme.name);
+        self.theme = prev;
+        theme::set_current(prev);
+        self.status = format!("Theme: {}", prev.label);
+        self.save_config();
+    }
+
+    /// Step the active subtitle track by ±1, including the "Off" slot. Wraps
+    /// at both ends. No-op when no subtitle tracks are loaded.
+    pub fn step_subtitle_track(&mut self, delta: i32) {
+        let count = self.subtitles.track_count();
+        if count == 0 {
+            self.status = String::from("No subtitles available (still loading?)");
+            return;
+        }
+        // Slots: 0..count = tracks, count = Off.
+        let total = (count + 1) as i32;
+        let current = self
+            .active_subtitle_track
+            .map(|i| i as i32)
+            .unwrap_or(count as i32);
+        let next_slot = (current + delta).rem_euclid(total);
+        self.active_subtitle_track = if (next_slot as usize) >= count {
+            None
+        } else {
+            Some(next_slot as usize)
+        };
+        self.current_subtitle_text = None;
+        self.status = match self.active_subtitle_track {
+            Some(i) => format!(
+                "Subtitles: {}",
+                self.subtitles
+                    .track_label(i)
+                    .unwrap_or_else(|| format!("Track {}", i + 1))
+            ),
+            None => String::from("Subtitles: off"),
+        };
+    }
+
+    pub fn reset_av_offset_auto(&mut self) {
+        self.auto_av_offset = true;
+        self.video_render_ewma_secs = 0.0;
+        self.av_offset_secs = baseline_av_offset(self.audio_output_latency_secs);
+        self.status = String::from("A/V offset: auto");
+    }
+
+    pub fn toggle_fullscreen(&mut self) {
+        self.fullscreen_vis = !self.fullscreen_vis;
+    }
+
+    /// Build the list of menu rows. Rows whose preconditions aren't met (e.g.
+    /// subtitles when no video is playing) are returned with `enabled = false`
+    /// so the renderer dims them and the key handler skips over them.
+    pub fn escape_menu_items(&self) -> Vec<EscapeMenuItem> {
+        let has_video = self.video.is_some();
+        let sub_label = if !has_video {
+            "—".to_string()
+        } else if self.subtitles.track_count() == 0 {
+            "None".to_string()
+        } else {
+            match self.active_subtitle_track {
+                Some(i) => self
+                    .subtitles
+                    .track_label(i)
+                    .unwrap_or_else(|| format!("Track {}", i + 1)),
+                None => "Off".to_string(),
+            }
+        };
+        let av_label = if !has_video {
+            "—".to_string()
+        } else if self.auto_av_offset {
+            format!("Auto ({:+.0} ms)", self.av_offset_secs * 1000.0)
+        } else {
+            format!("{:+.0} ms", self.av_offset_secs * 1000.0)
+        };
+        vec![
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Volume,
+                enabled: true,
+                label: "Volume",
+                value: format!("{:>3.0}%", self.player.volume() * 100.0),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Subtitle,
+                enabled: has_video && self.subtitles.track_count() > 0,
+                label: "Subtitle",
+                value: sub_label,
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::AvOffset,
+                enabled: has_video,
+                label: "A/V Offset",
+                value: av_label,
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Visualizer,
+                enabled: true,
+                label: "Visualizer",
+                value: self.visualizer.mode.label().to_string(),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Theme,
+                enabled: true,
+                label: "Theme",
+                value: self.theme.label.to_string(),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Fullscreen,
+                enabled: true,
+                label: "Fullscreen",
+                value: if self.fullscreen_vis { "On" } else { "Off" }.to_string(),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Repeat,
+                enabled: true,
+                label: "Repeat",
+                value: self.repeat.label().to_string(),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Shuffle,
+                enabled: true,
+                label: "Shuffle",
+                value: if self.shuffle { "On" } else { "Off" }.to_string(),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Separator,
+                enabled: false,
+                label: "",
+                value: String::new(),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Quit,
+                enabled: true,
+                label: "Quit",
+                value: String::new(),
+            },
+        ]
+    }
+
+    fn selectable_indices(&self) -> Vec<usize> {
+        self.escape_menu_items()
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.enabled && it.kind != EscapeMenuKind::Separator)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn open_escape_menu(&mut self) {
+        self.show_escape_menu = true;
+        if let Some(&first) = self.selectable_indices().first() {
+            self.escape_menu_selected = first;
+        }
+    }
+
+    pub fn close_escape_menu(&mut self) {
+        self.show_escape_menu = false;
+    }
+
+    pub fn escape_menu_move(&mut self, delta: i32) {
+        let selectable = self.selectable_indices();
+        if selectable.is_empty() {
+            return;
+        }
+        let pos = selectable
+            .iter()
+            .position(|&i| i == self.escape_menu_selected)
+            .unwrap_or(0);
+        let n = selectable.len() as i32;
+        let new_pos = (pos as i32 + delta).rem_euclid(n) as usize;
+        self.escape_menu_selected = selectable[new_pos];
+    }
+
+    /// Apply a horizontal adjustment (left/right arrow) to the currently
+    /// highlighted row.
+    pub fn escape_menu_adjust(&mut self, delta: i32) -> Result<()> {
+        let items = self.escape_menu_items();
+        let Some(item) = items.get(self.escape_menu_selected) else {
+            return Ok(());
+        };
+        if !item.enabled {
+            return Ok(());
+        }
+        match item.kind {
+            EscapeMenuKind::Volume => self.volume_step(0.05 * delta as f32),
+            EscapeMenuKind::Subtitle => self.step_subtitle_track(delta),
+            EscapeMenuKind::AvOffset => self.adjust_av_offset(AV_OFFSET_STEP_SECS * delta as f64),
+            EscapeMenuKind::Visualizer => {
+                if delta > 0 {
+                    self.cycle_visualizer();
+                } else {
+                    self.cycle_visualizer_back();
+                }
+            }
+            EscapeMenuKind::Theme => {
+                if delta > 0 {
+                    self.cycle_theme();
+                } else {
+                    self.cycle_theme_back();
+                }
+            }
+            EscapeMenuKind::Fullscreen => self.toggle_fullscreen(),
+            EscapeMenuKind::Repeat => self.cycle_repeat(),
+            EscapeMenuKind::Shuffle => self.toggle_shuffle(),
+            EscapeMenuKind::Quit | EscapeMenuKind::Separator => {}
+        }
+        Ok(())
+    }
+
+    /// Apply an "activate" (Enter / Space) to the currently highlighted row.
+    /// Returns `true` when the menu should close as a result.
+    pub fn escape_menu_activate(&mut self) -> Result<bool> {
+        let items = self.escape_menu_items();
+        let Some(item) = items.get(self.escape_menu_selected) else {
+            return Ok(false);
+        };
+        if !item.enabled {
+            return Ok(false);
+        }
+        match item.kind {
+            EscapeMenuKind::Quit => {
+                self.should_quit = true;
+                return Ok(true);
+            }
+            EscapeMenuKind::Fullscreen => self.toggle_fullscreen(),
+            EscapeMenuKind::Repeat => self.cycle_repeat(),
+            EscapeMenuKind::Shuffle => self.toggle_shuffle(),
+            // For A/V offset, Enter resets to Auto.
+            EscapeMenuKind::AvOffset => self.reset_av_offset_auto(),
+            _ => {}
+        }
+        Ok(false)
     }
 
     /// Persist the user-tunable bits (theme, volume, visualizer) to the

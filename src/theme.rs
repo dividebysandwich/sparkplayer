@@ -591,6 +591,11 @@ pub fn next_after(name: &str) -> Theme {
     ALL[(idx + 1) % ALL.len()]
 }
 
+pub fn prev_before(name: &str) -> Theme {
+    let idx = ALL.iter().position(|t| t.name == name).unwrap_or(0);
+    ALL[(idx + ALL.len() - 1) % ALL.len()]
+}
+
 thread_local! {
     static CURRENT: Cell<Theme> = const { Cell::new(DEFAULT) };
 }
