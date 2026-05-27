@@ -25,6 +25,9 @@ pub struct Theme {
     pub warn: Color,
     /// Low-contrast text for footer hints and metadata lines.
     pub dim: Color,
+    /// Normal body text — non-selected playlist/browser entries and menu
+    /// values. A readable, bright neutral that respects the theme palette.
+    pub text: Color,
     /// Background fill for every panel.
     pub bg: Color,
 }
@@ -39,6 +42,7 @@ pub const DEFAULT: Theme = Theme {
     ok: Color::Rgb(102, 255, 178),
     warn: Color::Rgb(255, 90, 120),
     dim: Color::Rgb(180, 180, 200),
+    text: Color::Rgb(224, 224, 240),
     bg: Color::Rgb(20, 20, 35),
 };
 
@@ -52,6 +56,7 @@ pub const MATRIX: Theme = Theme {
     ok: Color::Rgb(0, 220, 100),
     warn: Color::Rgb(255, 100, 100),
     dim: Color::Rgb(110, 170, 120),
+    text: Color::Rgb(180, 235, 190),
     bg: Color::Rgb(5, 15, 8),
 };
 
@@ -65,6 +70,7 @@ pub const AMBER: Theme = Theme {
     ok: Color::Rgb(255, 200, 50),
     warn: Color::Rgb(255, 80, 0),
     dim: Color::Rgb(170, 130, 60),
+    text: Color::Rgb(255, 238, 200),
     bg: Color::Rgb(25, 15, 5),
 };
 
@@ -78,6 +84,7 @@ pub const OCEAN: Theme = Theme {
     ok: Color::Rgb(100, 230, 200),
     warn: Color::Rgb(255, 120, 100),
     dim: Color::Rgb(140, 180, 220),
+    text: Color::Rgb(205, 226, 245),
     bg: Color::Rgb(5, 15, 35),
 };
 
@@ -91,6 +98,7 @@ pub const MONOCHROME: Theme = Theme {
     ok: Color::Rgb(220, 220, 220),
     warn: Color::Rgb(255, 120, 120),
     dim: Color::Rgb(150, 150, 150),
+    text: Color::Rgb(225, 225, 225),
     bg: Color::Rgb(15, 15, 15),
 };
 
@@ -110,6 +118,7 @@ pub const APPRENTICE: Theme = Theme {
     ok: Color::Rgb(135, 175, 135),
     warn: Color::Rgb(255, 135, 0),
     dim: Color::Rgb(188, 188, 188),
+    text: Color::Rgb(200, 200, 200),
     bg: Color::Rgb(38, 38, 38),
 };
 
@@ -123,6 +132,7 @@ pub const AYU_DARK: Theme = Theme {
     ok: Color::Rgb(170, 217, 76),
     warn: Color::Rgb(240, 113, 120),
     dim: Color::Rgb(104, 104, 104),
+    text: Color::Rgb(191, 189, 182),
     bg: Color::Rgb(11, 14, 20),
 };
 
@@ -136,6 +146,7 @@ pub const CATPPUCCIN_MOCHA: Theme = Theme {
     ok: Color::Rgb(137, 216, 139),
     warn: Color::Rgb(243, 119, 153),
     dim: Color::Rgb(88, 91, 112),
+    text: Color::Rgb(205, 214, 244),
     bg: Color::Rgb(30, 30, 46),
 };
 
@@ -149,6 +160,7 @@ pub const COBALT2: Theme = Theme {
     ok: Color::Rgb(58, 217, 0),
     warn: Color::Rgb(255, 98, 140),
     dim: Color::Rgb(255, 255, 255),
+    text: Color::Rgb(230, 235, 240),
     bg: Color::Rgb(18, 39, 56),
 };
 
@@ -162,6 +174,7 @@ pub const DEUS: Theme = Theme {
     ok: Color::Rgb(144, 201, 102),
     warn: Color::Rgb(236, 62, 69),
     dim: Color::Rgb(234, 234, 234),
+    text: Color::Rgb(224, 224, 224),
     bg: Color::Rgb(44, 50, 59),
 };
 
@@ -175,6 +188,7 @@ pub const DRACULA: Theme = Theme {
     ok: Color::Rgb(105, 255, 148),
     warn: Color::Rgb(255, 110, 110),
     dim: Color::Rgb(98, 114, 164),
+    text: Color::Rgb(248, 248, 242),
     bg: Color::Rgb(40, 42, 54),
 };
 
@@ -188,6 +202,7 @@ pub const EVERFOREST_DARK: Theme = Theme {
     ok: Color::Rgb(167, 192, 128),
     warn: Color::Rgb(230, 126, 128),
     dim: Color::Rgb(133, 146, 137),
+    text: Color::Rgb(211, 198, 170),
     bg: Color::Rgb(45, 53, 59),
 };
 
@@ -201,6 +216,7 @@ pub const GITHUB_DARK: Theme = Theme {
     ok: Color::Rgb(86, 211, 100),
     warn: Color::Rgb(255, 161, 152),
     dim: Color::Rgb(110, 118, 129),
+    text: Color::Rgb(201, 209, 217),
     bg: Color::Rgb(1, 4, 9),
 };
 
@@ -214,6 +230,7 @@ pub const GOTHAM: Theme = Theme {
     ok: Color::Rgb(42, 168, 137),
     warn: Color::Rgb(194, 49, 39),
     dim: Color::Rgb(153, 209, 206),
+    text: Color::Rgb(197, 209, 207),
     bg: Color::Rgb(12, 16, 20),
 };
 
@@ -227,6 +244,7 @@ pub const GRUVBOX_DARK: Theme = Theme {
     ok: Color::Rgb(184, 187, 38),
     warn: Color::Rgb(251, 73, 52),
     dim: Color::Rgb(146, 131, 116),
+    text: Color::Rgb(235, 219, 178),
     bg: Color::Rgb(40, 40, 40),
 };
 
@@ -240,6 +258,7 @@ pub const ICEBERG_DARK: Theme = Theme {
     ok: Color::Rgb(192, 202, 142),
     warn: Color::Rgb(233, 137, 137),
     dim: Color::Rgb(107, 112, 137),
+    text: Color::Rgb(198, 203, 222),
     bg: Color::Rgb(22, 24, 33),
 };
 
@@ -253,6 +272,7 @@ pub const JELLYBEANS: Theme = Theme {
     ok: Color::Rgb(189, 222, 171),
     warn: Color::Rgb(255, 161, 161),
     dim: Color::Rgb(189, 189, 189),
+    text: Color::Rgb(220, 220, 220),
     bg: Color::Rgb(18, 18, 18),
 };
 
@@ -266,6 +286,7 @@ pub const KANAGAWA_WAVE: Theme = Theme {
     ok: Color::Rgb(152, 187, 108),
     warn: Color::Rgb(232, 36, 36),
     dim: Color::Rgb(114, 113, 105),
+    text: Color::Rgb(220, 215, 186),
     bg: Color::Rgb(31, 31, 40),
 };
 
@@ -279,6 +300,7 @@ pub const LUCARIO: Theme = Theme {
     ok: Color::Rgb(114, 204, 90),
     warn: Color::Rgb(255, 101, 65),
     dim: Color::Rgb(248, 248, 242),
+    text: Color::Rgb(230, 238, 243),
     bg: Color::Rgb(43, 62, 80),
 };
 
@@ -292,6 +314,7 @@ pub const MIASMA: Theme = Theme {
     ok: Color::Rgb(95, 135, 95),
     warn: Color::Rgb(104, 87, 66),
     dim: Color::Rgb(102, 102, 102),
+    text: Color::Rgb(202, 192, 157),
     bg: Color::Rgb(34, 34, 34),
 };
 
@@ -305,6 +328,7 @@ pub const MOONFLY: Theme = Theme {
     ok: Color::Rgb(54, 198, 146),
     warn: Color::Rgb(255, 81, 137),
     dim: Color::Rgb(148, 148, 148),
+    text: Color::Rgb(205, 205, 205),
     bg: Color::Rgb(8, 8, 8),
 };
 
@@ -318,6 +342,7 @@ pub const NIGHT_OWL_DARK: Theme = Theme {
     ok: Color::Rgb(34, 218, 110),
     warn: Color::Rgb(239, 83, 80),
     dim: Color::Rgb(87, 86, 86),
+    text: Color::Rgb(214, 222, 235),
     bg: Color::Rgb(1, 22, 39),
 };
 
@@ -331,6 +356,7 @@ pub const NIGHTFLY: Theme = Theme {
     ok: Color::Rgb(33, 199, 168),
     warn: Color::Rgb(255, 88, 116),
     dim: Color::Rgb(124, 143, 143),
+    text: Color::Rgb(200, 210, 222),
     bg: Color::Rgb(1, 22, 39),
 };
 
@@ -344,6 +370,7 @@ pub const NIGHTFOX: Theme = Theme {
     ok: Color::Rgb(142, 186, 164),
     warn: Color::Rgb(209, 105, 131),
     dim: Color::Rgb(205, 206, 207),
+    text: Color::Rgb(205, 206, 207),
     bg: Color::Rgb(25, 35, 48),
 };
 
@@ -357,6 +384,7 @@ pub const NOCTIS: Theme = Theme {
     ok: Color::Rgb(96, 235, 177),
     warn: Color::Rgb(233, 119, 73),
     dim: Color::Rgb(71, 104, 108),
+    text: Color::Rgb(179, 201, 204),
     bg: Color::Rgb(3, 25, 27),
 };
 
@@ -370,6 +398,7 @@ pub const NORD: Theme = Theme {
     ok: Color::Rgb(163, 190, 140),
     warn: Color::Rgb(191, 97, 106),
     dim: Color::Rgb(216, 222, 233),
+    text: Color::Rgb(216, 222, 233),
     bg: Color::Rgb(46, 52, 64),
 };
 
@@ -383,6 +412,7 @@ pub const NORDIC: Theme = Theme {
     ok: Color::Rgb(177, 200, 157),
     warn: Color::Rgb(197, 114, 122),
     dim: Color::Rgb(187, 195, 212),
+    text: Color::Rgb(201, 209, 222),
     bg: Color::Rgb(36, 41, 51),
 };
 
@@ -396,6 +426,7 @@ pub const ONE_DARK: Theme = Theme {
     ok: Color::Rgb(152, 195, 121),
     warn: Color::Rgb(224, 108, 117),
     dim: Color::Rgb(171, 178, 191),
+    text: Color::Rgb(190, 197, 209),
     bg: Color::Rgb(40, 44, 52),
 };
 
@@ -409,6 +440,7 @@ pub const ONE_HALF_DARK: Theme = Theme {
     ok: Color::Rgb(152, 195, 121),
     warn: Color::Rgb(224, 108, 117),
     dim: Color::Rgb(220, 223, 228),
+    text: Color::Rgb(220, 223, 228),
     bg: Color::Rgb(40, 44, 52),
 };
 
@@ -422,6 +454,7 @@ pub const PANDA: Theme = Theme {
     ok: Color::Rgb(25, 249, 216),
     warn: Color::Rgb(255, 44, 109),
     dim: Color::Rgb(117, 117, 117),
+    text: Color::Rgb(230, 230, 235),
     bg: Color::Rgb(41, 42, 43),
 };
 
@@ -435,6 +468,7 @@ pub const POSTERPOLE: Theme = Theme {
     ok: Color::Rgb(146, 163, 143),
     warn: Color::Rgb(188, 143, 143),
     dim: Color::Rgb(165, 165, 156),
+    text: Color::Rgb(212, 207, 200),
     bg: Color::Rgb(37, 34, 42),
 };
 
@@ -448,6 +482,7 @@ pub const ROSE_PINE: Theme = Theme {
     ok: Color::Rgb(49, 116, 143),
     warn: Color::Rgb(235, 111, 146),
     dim: Color::Rgb(144, 140, 170),
+    text: Color::Rgb(224, 222, 244),
     bg: Color::Rgb(31, 29, 46),
 };
 
@@ -461,6 +496,7 @@ pub const SEOUL256_DARK: Theme = Theme {
     ok: Color::Rgb(135, 175, 135),
     warn: Color::Rgb(215, 95, 135),
     dim: Color::Rgb(208, 208, 208),
+    text: Color::Rgb(208, 208, 208),
     bg: Color::Rgb(58, 58, 58),
 };
 
@@ -474,6 +510,7 @@ pub const SHADES_OF_PURPLE: Theme = Theme {
     ok: Color::Rgb(58, 217, 0),
     warn: Color::Rgb(228, 57, 55),
     dim: Color::Rgb(255, 255, 255),
+    text: Color::Rgb(230, 230, 245),
     bg: Color::Rgb(30, 30, 63),
 };
 
@@ -487,6 +524,7 @@ pub const SOLARIZED_DARK: Theme = Theme {
     ok: Color::Rgb(88, 110, 117),
     warn: Color::Rgb(203, 75, 22),
     dim: Color::Rgb(131, 148, 150),
+    text: Color::Rgb(147, 161, 161),
     bg: Color::Rgb(0, 43, 54),
 };
 
@@ -500,6 +538,7 @@ pub const SONOKAI: Theme = Theme {
     ok: Color::Rgb(158, 208, 114),
     warn: Color::Rgb(252, 93, 124),
     dim: Color::Rgb(127, 132, 144),
+    text: Color::Rgb(224, 224, 226),
     bg: Color::Rgb(44, 46, 52),
 };
 
@@ -513,6 +552,7 @@ pub const SRCERY: Theme = Theme {
     ok: Color::Rgb(152, 188, 55),
     warn: Color::Rgb(247, 83, 65),
     dim: Color::Rgb(145, 129, 117),
+    text: Color::Rgb(251, 241, 199),
     bg: Color::Rgb(28, 27, 25),
 };
 
@@ -526,6 +566,7 @@ pub const TENDER: Theme = Theme {
     ok: Color::Rgb(201, 208, 92),
     warn: Color::Rgb(244, 55, 83),
     dim: Color::Rgb(238, 238, 238),
+    text: Color::Rgb(224, 224, 224),
     bg: Color::Rgb(40, 40, 40),
 };
 
@@ -539,6 +580,7 @@ pub const TOKYO_NIGHT: Theme = Theme {
     ok: Color::Rgb(158, 206, 106),
     warn: Color::Rgb(247, 118, 142),
     dim: Color::Rgb(192, 202, 245),
+    text: Color::Rgb(192, 202, 245),
     bg: Color::Rgb(26, 27, 38),
 };
 
@@ -552,6 +594,7 @@ pub const TOMORROW_NIGHT: Theme = Theme {
     ok: Color::Rgb(181, 189, 104),
     warn: Color::Rgb(204, 102, 102),
     dim: Color::Rgb(197, 200, 198),
+    text: Color::Rgb(197, 200, 198),
     bg: Color::Rgb(29, 31, 33),
 };
 
@@ -565,6 +608,7 @@ pub const ZENBONES_ZENWRITTEN_DARK: Theme = Theme {
     ok: Color::Rgb(139, 174, 104),
     warn: Color::Rgb(232, 131, 143),
     dim: Color::Rgb(187, 187, 187),
+    text: Color::Rgb(210, 210, 205),
     bg: Color::Rgb(25, 25, 25),
 };
 

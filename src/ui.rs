@@ -38,6 +38,9 @@ fn red() -> Color {
 fn dim() -> Color {
     theme::current().dim
 }
+fn text() -> Color {
+    theme::current().text
+}
 fn panel_bg() -> Color {
     theme::current().bg
 }
@@ -141,7 +144,7 @@ fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
                     .fg(yellow())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(220, 220, 240))
+                Style::default().fg(text())
             };
             ListItem::new(Line::from(vec![
                 Span::styled(prefix, Style::default().fg(cyan())),
@@ -205,7 +208,7 @@ fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
             let style = if p.is_dir() || parent {
                 Style::default().fg(cyan())
             } else {
-                Style::default().fg(Color::Rgb(220, 220, 240))
+                Style::default().fg(text())
             };
             ListItem::new(Span::styled(label, style))
         })
@@ -2374,7 +2377,7 @@ fn draw_escape_menu(frame: &mut Frame, area: Rect, app: &App) {
         } else if selected {
             Style::default().fg(pink()).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Rgb(220, 220, 240))
+            Style::default().fg(text())
         };
 
         let label_padded = pad_right(item.label, label_col);
