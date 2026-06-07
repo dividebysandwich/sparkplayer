@@ -828,8 +828,9 @@ impl App {
     }
 
     /// Cycle the display mode: Normal → in-app Fullscreen → external Video
-    /// Window → Normal. The external-window step is a no-op where the video
-    /// backend doesn't support one (web), so it collapses to Normal↔Fullscreen.
+    /// Window → Normal. The external-window step is skipped when the backend
+    /// doesn't support one (web) or no video is loaded (music), so in those
+    /// cases it collapses to Normal↔Fullscreen.
     pub fn cycle_display_mode(&mut self) {
         if self.video.external_window_enabled() {
             self.video.set_external_window(false);
@@ -837,13 +838,12 @@ impl App {
             self.status = String::from("Display: normal");
         } else if self.fullscreen_vis {
             self.fullscreen_vis = false;
-            if self.video.supports_external_window() {
+            // The external video window only makes sense when a video is
+            // actually playing — for music, collapse straight to normal so `f`
+            // just toggles normal ↔ fullscreen.
+            if self.video.supports_external_window() && self.video.is_loaded() {
                 self.video.set_external_window(true);
-                self.status = if self.video.is_loaded() {
-                    String::from("Display: video window")
-                } else {
-                    String::from("Display: video window (armed — opens on next video)")
-                };
+                self.status = String::from("Display: video window");
             } else {
                 self.status = String::from("Display: normal");
             }
