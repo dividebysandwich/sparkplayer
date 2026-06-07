@@ -43,6 +43,7 @@ pub enum FocusPane {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum EscapeMenuKind {
     Volume,
+    AudioTrack,
     Subtitle,
     AvOffset,
     Visualizer,
@@ -679,6 +680,39 @@ impl App {
         };
     }
 
+    /// Step the active audio track by ±1, wrapping around. Audio tracks (unlike
+    /// subtitles) have no "off" slot — there is always one playing.
+    pub fn step_audio_track(&mut self, delta: i32) {
+        let tracks = self.audio.audio_tracks();
+        if tracks.len() < 2 {
+            return;
+        }
+        let n = tracks.len() as i32;
+        let current = self.audio.active_audio_track().unwrap_or(0) as i32;
+        let next = (current + delta).rem_euclid(n) as usize;
+        match self.audio.set_audio_track(next) {
+            Ok(()) => {
+                self.status = format!(
+                    "Audio track: {}",
+                    tracks
+                        .get(next)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Track {}", next + 1))
+                );
+            }
+            Err(e) => self.status = format!("Audio track switch failed: {e}"),
+        }
+    }
+
+    /// Advance to the next audio track (the `b` key), mirroring `c` for subtitles.
+    pub fn cycle_audio_track(&mut self) {
+        if self.audio.audio_tracks().len() < 2 {
+            self.status = String::from("Only one audio track");
+            return;
+        }
+        self.step_audio_track(1);
+    }
+
     fn shuffle_remaining(&mut self) {
         let start = self.playing_index.map(|i| i + 1).unwrap_or(0);
         if start >= self.tracks.len() {
@@ -867,12 +901,28 @@ impl App {
         } else {
             format!("{:+.0} ms", self.av_offset_secs * 1000.0)
         };
+        let audio_tracks = self.audio.audio_tracks();
+        let audio_label = if !has_video || audio_tracks.len() < 2 {
+            "—".to_string()
+        } else {
+            let cur = self.audio.active_audio_track().unwrap_or(0);
+            audio_tracks
+                .get(cur)
+                .cloned()
+                .unwrap_or_else(|| format!("Track {}", cur + 1))
+        };
         let mut items = vec![
             EscapeMenuItem {
                 kind: EscapeMenuKind::Volume,
                 enabled: true,
                 label: "Volume",
                 value: format!("{:>3.0}%", self.audio.volume() * 100.0),
+            },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::AudioTrack,
+                enabled: has_video && audio_tracks.len() > 1,
+                label: "Audio Track",
+                value: audio_label,
             },
             EscapeMenuItem {
                 kind: EscapeMenuKind::Subtitle,
@@ -1002,6 +1052,7 @@ impl App {
         }
         match item.kind {
             EscapeMenuKind::Volume => self.volume_step(0.05 * delta as f32),
+            EscapeMenuKind::AudioTrack => self.step_audio_track(delta),
             EscapeMenuKind::Subtitle => self.step_subtitle_track(delta),
             EscapeMenuKind::AvOffset => self.adjust_av_offset(AV_OFFSET_STEP_SECS * delta as f64),
             EscapeMenuKind::Visualizer => {
@@ -1144,6 +1195,7 @@ impl App {
             CoreKey::Char('A') => self.queue_browser_directory(),
             CoreKey::Char('C') => self.clear_playlist(),
             CoreKey::Char('c') => self.cycle_subtitle_track(),
+            CoreKey::Char('b') => self.cycle_audio_track(),
             CoreKey::Char('?') | CoreKey::Char('h') => {
                 self.show_help = true;
                 self.help_scroll = 0;

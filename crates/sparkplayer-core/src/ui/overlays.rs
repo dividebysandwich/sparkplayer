@@ -109,6 +109,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  Ctrl+← / →     seek -30s / +30s"),
         Line::from("  + / = / -      volume up / up / down"),
         Line::from("  [ / ]          A/V sync offset -25ms / +25ms (video)"),
+        Line::from("  b              cycle audio track (video)"),
         Line::from("  c              cycle subtitle track (video)"),
         Line::from(""),
         section("Navigation"),
@@ -249,7 +250,8 @@ pub(super) fn draw_escape_menu(frame: &mut Frame, area: Rect, app: &App) {
             format!("{} {}", bar, item.value)
         } else if matches!(
             item.kind,
-            EscapeMenuKind::Subtitle
+            EscapeMenuKind::AudioTrack
+                | EscapeMenuKind::Subtitle
                 | EscapeMenuKind::Visualizer
                 | EscapeMenuKind::Theme
         ) && item.enabled

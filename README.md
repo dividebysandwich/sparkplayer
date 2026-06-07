@@ -93,6 +93,11 @@ If audio and video drift apart, use `[` / `]` to nudge the A/V offset in 25 ms
 steps (clamped between −500 ms and +2000 ms). Toggling fullscreen with `f`
 scales the video to fill the whole window.
 
+When a video carries more than one audio track (e.g. different languages or a
+commentary), press `b` to cycle between them — the picture keeps playing in
+place. Subtitle tracks cycle the same way with `c`. Both are also available from
+the `Esc` menu, where ‹ › adjust the selection.
+
 ### Command-line options
 
 ```
@@ -120,6 +125,8 @@ Playback
 | `+` / `=`          | Volume up (5%)                          |
 | `-`                | Volume down (5%)                        |
 | `[` / `]`          | Nudge A/V sync offset by 25 ms (video)  |
+| `b`                | Cycle audio track (video)               |
+| `c`                | Cycle subtitle track (video)            |
 | `Enter`            | Play the highlighted item               |
 
 Navigation

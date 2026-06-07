@@ -45,18 +45,28 @@ enum FrameDisposition {
 }
 
 impl FfmpegAudioSource {
+    /// Open the best audio stream of `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        ffmpeg::init().ok();
-        // Mute libav warnings ("Could not update timestamps for skipped
-        // samples", etc.) — they corrupt the TUI when written to stderr.
-        ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Fatal);
-        let ictx = ffmpeg::format::input(&path.to_path_buf())
-            .with_context(|| format!("opening {}", path.display()))?;
-        let stream = ictx
+        let ictx = open_input(path)?;
+        let stream_index = ictx
             .streams()
             .best(MediaType::Audio)
-            .context("file has no audio stream")?;
-        let stream_index = stream.index();
+            .context("file has no audio stream")?
+            .index();
+        Self::from_input(ictx, stream_index)
+    }
+
+    /// Open a specific audio stream of `path` (used to switch between the
+    /// multiple audio tracks a video container may carry).
+    pub fn open_stream(path: &Path, stream_index: usize) -> Result<Self> {
+        let ictx = open_input(path)?;
+        Self::from_input(ictx, stream_index)
+    }
+
+    fn from_input(ictx: ffmpeg::format::context::Input, stream_index: usize) -> Result<Self> {
+        let stream = ictx
+            .stream(stream_index)
+            .context("audio stream index out of range")?;
         let time_base = stream.time_base();
         let duration = {
             let dur = stream.duration();
@@ -308,12 +318,105 @@ where
     }
 }
 
+/// Open an ffmpeg input, muting libav's chatty stderr warnings first (they
+/// corrupt the TUI when written to the terminal).
+fn open_input(path: &Path) -> Result<ffmpeg::format::context::Input> {
+    ffmpeg::init().ok();
+    ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Fatal);
+    ffmpeg::format::input(&path.to_path_buf()).with_context(|| format!("opening {}", path.display()))
+}
+
+/// One selectable audio track inside a container, paired with the ffmpeg
+/// stream index needed to decode it.
+#[derive(Clone)]
+struct AudioTrackInfo {
+    stream_index: usize,
+    label: String,
+}
+
+/// Enumerate every audio stream in `path`, returning the tracks (in container
+/// order) and the index — into the returned vector — of the default ("best")
+/// track ffmpeg would otherwise pick. Returns an empty list on any failure.
+fn list_audio_tracks(path: &Path) -> (Vec<AudioTrackInfo>, usize) {
+    let Ok(ictx) = open_input(path) else {
+        return (Vec::new(), 0);
+    };
+    let best_index = ictx.streams().best(MediaType::Audio).map(|s| s.index());
+    let mut tracks: Vec<AudioTrackInfo> = Vec::new();
+    let mut default_idx = 0;
+    for stream in ictx.streams() {
+        if stream.parameters().medium() != MediaType::Audio {
+            continue;
+        }
+        let idx = stream.index();
+        if Some(idx) == best_index {
+            default_idx = tracks.len();
+        }
+        let label = audio_track_label(&stream, tracks.len() + 1);
+        tracks.push(AudioTrackInfo {
+            stream_index: idx,
+            label,
+        });
+    }
+    (tracks, default_idx)
+}
+
+/// Build a human label for an audio stream from its language/title metadata,
+/// suffixed with a channel-layout hint (e.g. "English (5.1)").
+fn audio_track_label(stream: &ffmpeg::format::stream::Stream<'_>, n: usize) -> String {
+    let meta = stream.metadata();
+    let title = meta
+        .get("title")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let language = meta
+        .get("language")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "und");
+    let lang_name = language
+        .as_deref()
+        .map(sparkplayer_core::subtitles::language_display_name);
+
+    // Prefer the language name (matching the subtitle loader); fall back to a
+    // meaningful title, then to a numbered placeholder. The channel-layout hint
+    // disambiguates same-language tracks (e.g. "French (5.1)" vs "French (stereo)").
+    let base = match lang_name {
+        Some(name) => name,
+        None => match title {
+            Some(t) => t,
+            None => format!("Track {n}"),
+        },
+    };
+    match channel_desc(stream) {
+        Some(c) => format!("{base} ({c})"),
+        None => base,
+    }
+}
+
+/// Best-effort channel-layout descriptor ("mono", "stereo", "5.1", …).
+fn channel_desc(stream: &ffmpeg::format::stream::Stream<'_>) -> Option<String> {
+    let ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).ok()?;
+    let decoder = ctx.decoder().audio().ok()?;
+    Some(match decoder.channels() {
+        0 => return None,
+        1 => "mono".to_string(),
+        2 => "stereo".to_string(),
+        6 => "5.1".to_string(),
+        8 => "7.1".to_string(),
+        c => format!("{c}ch"),
+    })
+}
+
 pub struct AudioPlayer {
     sink: MixerDeviceSink,
     player: Player,
     pub tap: SampleBuffer,
     volume: f32,
     pub current_path: Option<PathBuf>,
+    /// Audio tracks of the current file (only populated for video containers).
+    audio_tracks: Vec<AudioTrackInfo>,
+    /// Index into `audio_tracks` of the track currently being decoded.
+    active_audio_track: usize,
 }
 
 impl AudioPlayer {
@@ -329,7 +432,18 @@ impl AudioPlayer {
             tap,
             volume: 0.8,
             current_path: None,
+            audio_tracks: Vec::new(),
+            active_audio_track: 0,
         })
+    }
+
+    /// Open the audio of a video file on the currently selected track, falling
+    /// back to ffmpeg's "best" stream when no track list is available.
+    fn open_video_audio(&self, path: &Path) -> Result<FfmpegAudioSource> {
+        match self.audio_tracks.get(self.active_audio_track) {
+            Some(t) => FfmpegAudioSource::open_stream(path, t.stream_index),
+            None => FfmpegAudioSource::open(path),
+        }
     }
 
     pub fn play_file(&mut self, path: &Path) -> Result<Option<Duration>> {
@@ -338,9 +452,14 @@ impl AudioPlayer {
         self.player.set_volume(self.volume);
         self.tap.reset();
         self.current_path = Some(path.to_path_buf());
+        self.audio_tracks.clear();
+        self.active_audio_track = 0;
 
         let total = if library::is_video_file(path) {
-            let source = FfmpegAudioSource::open(path)?;
+            let (tracks, default_idx) = list_audio_tracks(path);
+            self.audio_tracks = tracks;
+            self.active_audio_track = default_idx;
+            let source = self.open_video_audio(path)?;
             let total = source.total_duration();
             let tapped = TapSource::new(source, self.tap.clone());
             self.player.append(tapped);
@@ -368,7 +487,7 @@ impl AudioPlayer {
         self.tap.set_base_offset(target);
 
         if library::is_video_file(path) {
-            let mut source = FfmpegAudioSource::open(path)?;
+            let mut source = self.open_video_audio(path)?;
             source.seek(target)?;
             let tapped = TapSource::new(source, self.tap.clone());
             self.player.append(tapped);
@@ -390,6 +509,38 @@ impl AudioPlayer {
                 self.player.append(tapped);
             }
         }
+
+        if was_paused {
+            self.player.pause();
+        } else {
+            self.player.play();
+        }
+        Ok(())
+    }
+
+    /// Switch to a different audio track, re-decoding from the current playback
+    /// position so picture and sound stay put. No-op for non-video files or an
+    /// out-of-range index.
+    fn set_audio_track(&mut self, idx: usize) -> Result<()> {
+        let Some(path) = self.current_path.clone() else {
+            return Ok(());
+        };
+        if !library::is_video_file(&path) || idx >= self.audio_tracks.len() {
+            return Ok(());
+        }
+        self.active_audio_track = idx;
+        let target = self.tap.position();
+        let was_paused = self.player.is_paused();
+        self.player.stop();
+        self.player = Player::connect_new(self.sink.mixer());
+        self.player.set_volume(self.volume);
+        self.tap.reset();
+        self.tap.set_base_offset(target);
+
+        let mut source = self.open_video_audio(&path)?;
+        source.seek(target)?;
+        let tapped = TapSource::new(source, self.tap.clone());
+        self.player.append(tapped);
 
         if was_paused {
             self.player.pause();
@@ -478,5 +629,69 @@ impl AudioBackend for AudioPlayer {
 
     fn output_buffer_latency(&self) -> Duration {
         AudioPlayer::output_buffer_latency(self)
+    }
+
+    fn audio_tracks(&self) -> Vec<String> {
+        self.audio_tracks.iter().map(|t| t.label.clone()).collect()
+    }
+
+    fn active_audio_track(&self) -> Option<usize> {
+        if self.audio_tracks.is_empty() {
+            None
+        } else {
+            Some(self.active_audio_track)
+        }
+    }
+
+    fn set_audio_track(&mut self, idx: usize) -> Result<()> {
+        AudioPlayer::set_audio_track(self, idx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 1 GB sample lives at the repo root; tests run from the crate dir.
+    fn sample() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../marsexpress.mkv")
+    }
+
+    #[test]
+    fn enumerates_multiple_audio_tracks() {
+        let path = sample();
+        if !path.exists() {
+            eprintln!("skipping: {} not present", path.display());
+            return;
+        }
+        let (tracks, default_idx) = list_audio_tracks(&path);
+        assert!(
+            tracks.len() >= 2,
+            "expected >=2 audio tracks, got {}: {:?}",
+            tracks.len(),
+            tracks.iter().map(|t| &t.label).collect::<Vec<_>>()
+        );
+        assert!(default_idx < tracks.len());
+        // The sample carries a French 5.1 and an English stereo track.
+        let labels: Vec<&str> = tracks.iter().map(|t| t.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("French")),
+            "labels: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("English")),
+            "labels: {labels:?}"
+        );
+
+        // Each enumerated stream must actually open and decode at least a sample.
+        for t in &tracks {
+            let mut src = FfmpegAudioSource::open_stream(&path, t.stream_index)
+                .unwrap_or_else(|e| panic!("opening track '{}' ({e})", t.label));
+            assert!(
+                src.next().is_some(),
+                "track '{}' produced no samples",
+                t.label
+            );
+        }
     }
 }

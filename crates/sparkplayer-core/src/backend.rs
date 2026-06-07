@@ -84,6 +84,23 @@ pub trait AudioBackend {
     fn duration(&self) -> Option<Duration> {
         None
     }
+    /// Human labels for the audio tracks in the current file, in selection
+    /// order. More than one entry only for multi-audio containers (some
+    /// MKV/MP4). Empty or a single entry means there is nothing to switch.
+    /// Default: none (single-stream backends, web).
+    fn audio_tracks(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Index (into [`audio_tracks`](Self::audio_tracks)) of the audio track
+    /// currently playing, or `None` when the file has no enumerated tracks.
+    fn active_audio_track(&self) -> Option<usize> {
+        None
+    }
+    /// Switch to audio track `idx`, preserving playback position and pause
+    /// state. No-op for an invalid index or a backend without track support.
+    fn set_audio_track(&mut self, _idx: usize) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Video playback. Native decodes frames with ffmpeg and renders them in the
