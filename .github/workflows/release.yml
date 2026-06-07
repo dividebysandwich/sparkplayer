@@ -215,11 +215,11 @@ jobs:
         run: cargo install cargo-wix --locked
 
       - name: Build MSI installer
-        # Use the committed wix/main.wxs (which bundles the FFmpeg + SDL2 DLLs)
-        # instead of regenerating the exe-only default template. The DLLs were
-        # copied next to the binary in the staging step above, so the
-        # $(var.CargoTargetBinDir) sources in the WiX file resolve.
-        run: cargo wix -p sparkplayer-native --no-build --nocapture --target ${{ env.TARGET }} --output target/wix wix/main.wxs
+        # Uses the committed crates/sparkplayer-native/wix/main.wxs (which
+        # bundles the FFmpeg + SDL2 DLLs) — cargo-wix auto-discovers it from the
+        # package's wix/ folder. The DLLs were copied next to the binary in the
+        # staging step above, so the $(var.CargoTargetBinDir) sources resolve.
+        run: cargo wix -p sparkplayer-native --no-build --nocapture --target ${{ env.TARGET }} --output target/wix
 
       - name: Stage zip archive
         shell: pwsh

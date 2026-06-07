@@ -94,7 +94,7 @@
                     <!-- License shipped next to the binary (GPL-2.0-only). -->
                     <Component Id="license_doc" Guid="*">
                         <File Id="license_txt" Name="LICENSE.txt" DiskId="1"
-                              Source="$(sys.SOURCEFILEDIR)..\LICENSE" KeyPath="yes" />
+                              Source="$(sys.SOURCEFILEDIR)..\..\..\LICENSE" KeyPath="yes" />
                     </Component>
 
                     <!-- Add the install dir to the system PATH so `sparkplayer`
