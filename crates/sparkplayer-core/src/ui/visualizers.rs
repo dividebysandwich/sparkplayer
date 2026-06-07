@@ -397,7 +397,8 @@ fn dim_axis() -> Color {
 }
 
 /// Audio-reactive plasma field: layered sines drifting over time, brightened by
-/// bass and shimmered by treble, mapped through the spectrogram heat ramp.
+/// bass and shimmered by treble, mapped through the spectrogram heat ramp whose
+/// hue slowly rotates so the whole palette morphs over time.
 fn draw_plasma(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
     let w = area.width as usize;
     let h = area.height as usize;
@@ -405,30 +406,95 @@ fn draw_plasma(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
         return;
     }
     let sr = app.audio.tap().sample_rate();
-    let (phase, bands) = app.visualizer.plasma_state(app.audio.tap(), sr, active);
-    let (bass, _mid, treble) = (bands[0], bands[1], bands[2]);
+    let (phase, hue, bands) = app.visualizer.plasma_state(app.audio.tap(), sr, active);
+    let (bass, mid, treble) = (bands[0], bands[1], bands[2]);
+    let energy = (bass + mid + treble) / 3.0;
     let p = phase;
+    // Bass "zooms" the pattern (tightens the spatial frequency) so kicks make the
+    // whole field bloom and churn; mid bends the diagonal wave's phase.
+    let warp = 1.0 + bass * 1.6;
+    let mid_shift = mid * 6.0;
     let buf = frame.buffer_mut();
     for yy in 0..h {
         let fy = yy as f32;
         for xx in 0..w {
             let fx = xx as f32;
-            let v = (fx * 0.20 + p).sin()
-                + (fy * 0.26 + p * 0.8).sin()
-                + ((fx + fy) * 0.15 + p * 1.3).sin()
+            let v = (fx * 0.20 * warp + p).sin()
+                + (fy * 0.26 * warp + p * 0.8).sin()
+                + ((fx + fy) * 0.15 + p * 1.3 + mid_shift).sin()
                 + ((fx * fx + fy * fy).sqrt() * 0.16 - p * 1.1).sin();
             // Map [-4, 4] → [0, 1].
             let base = v * 0.125 + 0.5;
-            // Bass lifts overall intensity; treble adds a moving shimmer.
-            let shimmer = treble * 0.2 * ((fx * 0.5 + p * 3.0).sin() * 0.5 + 0.5);
-            let t = (base * (0.45 + 0.85 * bass) + shimmer).clamp(0.0, 1.0);
-            let color = heatmap(t);
+            // Treble adds a fast moving shimmer.
+            let shimmer = treble * 0.3 * ((fx * 0.5 + p * 4.0).sin() * 0.5 + 0.5);
+            // Brightness reacts to loudness but is kept off the blown-out top of
+            // the ramp most of the time, so only real peaks reach the hot tones.
+            let t = (base * (0.30 + 0.85 * energy) + 0.15 * bass + shimmer).clamp(0.0, 1.0);
+            // Rotate the heat ramp's hue (slow palette morph) and ease off its
+            // saturation so the field stays vivid without looking oversaturated.
+            let color = shift_hue_sat(heatmap(t), hue, 0.72);
             if let Some(cell) = buf.cell_mut((area.x + xx as u16, area.y + yy as u16)) {
                 cell.set_char(' ');
                 cell.set_bg(color);
             }
         }
     }
+}
+
+/// Rotate a color's hue by `delta` (0..1 = a full turn) and scale its saturation
+/// by `sat_scale`, preserving its value. Used to morph the plasma palette over
+/// time while keeping it from reading as over-saturated.
+fn shift_hue_sat(c: Color, delta: f32, sat_scale: f32) -> Color {
+    let (r, g, b) = rgb(c);
+    let (h, s, v) = rgb_to_hsv(r, g, b);
+    let (r, g, b) = hsv_to_rgb(
+        (h + delta).rem_euclid(1.0),
+        (s * sat_scale).clamp(0.0, 1.0),
+        v,
+    );
+    Color::Rgb(r, g, b)
+}
+
+fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let r = r as f32 / 255.0;
+    let g = g as f32 / 255.0;
+    let b = b as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d <= 1e-6 {
+        0.0
+    } else if max == r {
+        (((g - b) / d) % 6.0) / 6.0
+    } else if max == g {
+        (((b - r) / d) + 2.0) / 6.0
+    } else {
+        (((r - g) / d) + 4.0) / 6.0
+    };
+    let s = if max <= 1e-6 { 0.0 } else { d / max };
+    (h.rem_euclid(1.0), s, max)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h6 = h.rem_euclid(1.0) * 6.0;
+    let i = h6.floor() as i32;
+    let f = h6 - i as f32;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    (
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
 }
 
 fn draw_waveform(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
@@ -782,4 +848,38 @@ fn heatmap(t: f32) -> Color {
     }
     let (r, g, b) = stops[stops.len() - 1].1;
     Color::Rgb(r, g, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: (u8, u8, u8), b: (u8, u8, u8)) -> bool {
+        let d = |x: u8, y: u8| (x as i32 - y as i32).abs() <= 2;
+        d(a.0, b.0) && d(a.1, b.1) && d(a.2, b.2)
+    }
+
+    #[test]
+    fn hsv_round_trips() {
+        for c in [(255, 0, 0), (10, 8, 25), (250, 140, 60), (0, 229, 255), (130, 70, 200)] {
+            let (h, s, v) = rgb_to_hsv(c.0, c.1, c.2);
+            assert!(approx(hsv_to_rgb(h, s, v), c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn zero_hue_shift_is_identity() {
+        for c in [(255, 0, 0), (250, 140, 60), (0, 229, 255)] {
+            let shifted = shift_hue_sat(Color::Rgb(c.0, c.1, c.2), 0.0, 1.0);
+            assert!(matches!(shifted, Color::Rgb(r, g, b) if approx((r, g, b), c)));
+        }
+    }
+
+    #[test]
+    fn half_turn_then_half_turn_returns_original() {
+        let c = (250, 140, 60);
+        let once = shift_hue_sat(Color::Rgb(c.0, c.1, c.2), 0.5, 1.0);
+        let twice = shift_hue_sat(once, 0.5, 1.0);
+        assert!(matches!(twice, Color::Rgb(r, g, b) if approx((r, g, b), c)));
+    }
 }

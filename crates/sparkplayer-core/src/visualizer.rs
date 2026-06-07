@@ -128,6 +128,8 @@ pub struct Visualizer {
     last_consumed_for_vu: u64,
     /// Animation phase for the plasma field.
     plasma_phase: f32,
+    /// Slowly rotating hue offset (0..1) that morphs the plasma palette.
+    plasma_hue: f32,
     last_consumed_for_plasma: u64,
     pub mode: VisMode,
 }
@@ -175,6 +177,7 @@ impl Visualizer {
             vu_peak_hold: [0.0, 0.0],
             last_consumed_for_vu: 0,
             plasma_phase: 0.0,
+            plasma_hue: 0.0,
             last_consumed_for_plasma: 0,
             mode: VisMode::Spectrum,
         }
@@ -515,14 +518,15 @@ impl Visualizer {
         }
     }
 
-    /// Advance the plasma phase and return it alongside coarse bass/mid/treble
-    /// energies. Phase drift speeds up with overall energy; both freeze on pause.
+    /// Advance the plasma field and return its drift `phase`, a slowly rotating
+    /// `hue` offset (0..1) for morphing the palette, and coarse bass/mid/treble
+    /// energies. Phase drift speeds up with overall energy; all freeze on pause.
     pub fn plasma_state(
         &mut self,
         tap: &SampleBuffer,
         sample_rate: u32,
         active: bool,
-    ) -> (f32, [f32; 3]) {
+    ) -> (f32, f32, [f32; 3]) {
         let bands = if active {
             self.compute_fft(tap);
             let b = self.log_bin_db(3, sample_rate, -70.0, 65.0);
@@ -532,12 +536,16 @@ impl Visualizer {
         };
         let dt = Self::advance_dt(&mut self.last_consumed_for_plasma, tap, active);
         let energy = (bands[0] + bands[1] + bands[2]) / 3.0;
-        self.plasma_phase += dt * (0.6 + energy * 2.5);
+        // The field churns much faster when the music is loud, so beats visibly
+        // drive the motion rather than just a steady drift.
+        self.plasma_phase += dt * (0.4 + energy * 7.0);
         let tau = std::f32::consts::TAU;
         if self.plasma_phase > tau * 1024.0 {
             self.plasma_phase = self.plasma_phase.rem_euclid(tau);
         }
-        (self.plasma_phase, bands)
+        // Rotate the palette roughly once every ~40 seconds of playback.
+        self.plasma_hue = (self.plasma_hue + dt * 0.025).rem_euclid(1.0);
+        (self.plasma_phase, self.plasma_hue, bands)
     }
 
     pub fn toggle_mode(&mut self) {
