@@ -1,6 +1,6 @@
 # sparkplayer
 
-A fun, no-nonsense terminal based media player using Ratatui
+A fun, no-nonsense terminal media player built with Ratatui.
 
 <img width="1501" height="932" alt="image" src="https://github.com/user-attachments/assets/6f7388cb-c2fb-4b06-8d11-93f82e916906" />
 
@@ -8,83 +8,105 @@ A fun, no-nonsense terminal based media player using Ratatui
 
 <img width="1992" height="1298" alt="image" src="https://github.com/user-attachments/assets/64343b32-d799-44da-b27c-15384851166d" />
 
-# Installation
+## Overview
 
-SparkPlayer is written in Rust. Stable Rust 1.85 or newer is required (the
-crate uses the 2024 edition).
+SparkPlayer is a music player you'll want to use every day. Point it
+at your on-disk music library and it just works: it opens to your music
+directory, browses your folders, plays virtually every audio format you own, and
+keeps your playlist a single keypress away. No setup ceremony, no library
+import, no fuss.
 
-System dependencies on Linux:
+It lives entirely in the terminal, but it doesn't look or feel like a
+bare-bones tool. You get colorful audio visualizers (FFT bars, waveforms,
+spectrograms, a stereo X/Y scope, a 3D spectrum, even a spinning cassette
+tape), embedded album art rendered as real graphics, and — yes — video
+playback right in the terminal. On terminals with a graphics protocol you get
+true images; everywhere else SparkPlayer falls back to 24-bit-color halfblocks
+so it still works, anywhere.
 
-- ALSA development headers (`libasound2-dev` on Debian/Ubuntu,
-  `alsa-lib` on Arch, `alsa-lib-devel` on Fedora) for audio output.
-- FFmpeg development libraries (`libavcodec-dev`, `libavformat-dev`,
-  `libavutil-dev`, `libswscale-dev`, `libswresample-dev` on Debian/Ubuntu,
-  `ffmpeg` on Arch, `ffmpeg-devel` on Fedora) for video decoding.
-- A terminal capable of 24-bit color. Most modern terminals qualify
-  (Alacritty, Kitty, WezTerm, foot, Ghostty, iTerm2, Windows Terminal, ...).
-- Optional: a terminal that implements a graphics protocol (Kitty, Sixel,
-  or iTerm2 inline images) to render embedded album art and video as real
-  graphics instead of colored halfblocks.
+Highlights:
 
-SparkPlayer is a Cargo workspace:
+- **Easy to use** — opens to your music directory, browse-and-play, helpful
+  help overlay (`?`), sensible keyboard shortcuts.
+- **Great daily driver** — lightweight, fast, and built to be your main player
+  for a local music library.
+- **Lots of formats** — common audio, video, and playlist formats all
+  supported out of the box.
+- **Graphics in the terminal** — album art and video as real images on capable
+  terminals, with a colored-halfblock fallback for everything else.
+- **Fun** — a pile of visualizers to flip through while you listen.
+- **Runs in the browser too** — there's a WASM build (see below).
 
-- `crates/sparkplayer-core` — platform-agnostic core (UI, visualizers, app
-  state, keymap, and the backend traits), shared by both builds.
-- `crates/sparkplayer-native` — the terminal player (this binary).
-- `crates/sparkplayer-web` — the browser/WASM build (see below).
+## Supported formats
 
-Build the terminal player from source:
+- **Audio:** `mp3`, `wav`, `ogg`, `flac`, `m4a`, `aac`, `opus`, `wma`
+- **Video:** `mp4`, `mkv`, `avi`, `mov`, `webm`, `m4v`
+- **Playlists:** `m3u`, `m3u8`, `pls`
 
-```sh
-git clone https://github.com/dividebysandwich/sparkplayer.git
-cd sparkplayer
-cargo build --release
-```
+## Usage
 
-The compiled binary lands in `target/release/sparkplayer`. Copy it
-somewhere on your `PATH` (for example `~/.local/bin/`) or run it in place.
-
-Or install directly from a checkout with cargo:
-
-```sh
-cargo install --path crates/sparkplayer-native
-```
-
-## Browser build (WASM)
-
-SparkPlayer also runs in the browser, rendered with
-[Ratzilla](https://github.com/ratatui/ratzilla) on a canvas (fixed-cell grid),
-using a bundled [Meslo Nerd Font Mono](https://github.com/ryanoasis/nerd-fonts)
-webfont. Audio plays through the Web Audio API (with the visualizer tapping the
-analyser), and video is shown via a real `<video>` element floated over the
-terminal grid. No FFmpeg/SDL/ALSA — the browser does the decoding.
+Run without arguments to open your operating system's music directory:
 
 ```sh
-rustup target add wasm32-unknown-unknown
-cargo install trunk            # one-time
-cd crates/sparkplayer-web
-trunk serve                    # dev server at http://localhost:8080
-# or: trunk build --release    # static bundle in crates/sparkplayer-web/dist/
+sparkplayer
 ```
 
-It chooses its media source at startup from `manifest.json` (served next to the
-page):
+A specific file, directory, or playlist can be passed as the only positional
+argument:
 
-- **Web-playlist mode** — if `manifest.json` lists `tracks`, they are loaded and
-  played. Each entry takes a `url` (required) plus optional `title`, `artwork`
-  (cover image URL) and `subtitles` (a `.vtt` URL):
-  `{ "tracks": [ { "url": "https://host/song.mp3", "title": "Song", "artwork": "https://host/cover.jpg", "subtitles": "https://host/song.en.vtt" } ] }`.
-  Hosted media must send permissive CORS headers (the player loads media with
-  `crossorigin="anonymous"`), otherwise the visualizer's analyser reads silence.
-- **Local-file mode** — if `tracks` is empty, use the file picker at the top of
-  the page to play files from your PC. Picked files have their tags and embedded
-  cover art parsed in-browser (via `lofty`), so title/artist/album and album art
-  show just like the native build.
+```sh
+sparkplayer ~/Music/album/        # play every audio file under the directory, recursively
+sparkplayer song.flac             # play a single file
+sparkplayer playlist.m3u          # load an M3U / M3U8 playlist
+sparkplayer playlist.pls          # load a PLS playlist
+```
 
-Browsers require a user gesture before audio can start, so the first keypress (or
-file pick) begins playback.
+The browser pane on the left lets you navigate the filesystem; pressing `Enter`
+on a directory descends into it, on a playlist file replaces the current
+playlist, and on an audio file appends it to the playlist and starts playing it.
 
-# Keyboard shortcuts
+### Album art
+
+Album art is read from embedded tags (ID3 APIC, MP4 `covr`, FLAC PICTURE,
+Vorbis METADATA_BLOCK_PICTURE) and, if none is embedded, from a sidecar file in
+the same directory named `cover`, `folder`, `front`, `albumart`, `album`, or
+`artwork` with a `.jpg`, `.jpeg`, `.png`, or `.webp` extension.
+
+### Video playback
+
+Video files are decoded with FFmpeg on a background thread and rendered in the
+album-art pane in place of cover artwork. Frames are pulled in PTS order and
+sampled against the audio clock, so picture stays synchronised with the
+soundtrack. Seeking, pausing, and skipping work the same as for audio-only
+tracks.
+
+Picture quality depends on the terminal's graphics protocol:
+
+- Kitty, WezTerm, Ghostty, or iTerm2 render true graphics — choose one of these
+  for the best result.
+- Sixel-capable terminals (foot, mlterm, xterm with `--enable-sixel`) also
+  render real images.
+- Other terminals fall back to 24-bit-color halfblocks, which is watchable but
+  coarse.
+
+If audio and video drift apart, use `[` / `]` to nudge the A/V offset in 25 ms
+steps (clamped between −500 ms and +2000 ms). Toggling fullscreen with `f`
+scales the video to fill the whole window.
+
+### Command-line options
+
+```
+--autoplay              Auto-start playback once the playlist is loaded (default: on)
+--graphics <PROTOCOL>   Override the album-art graphics protocol.
+                        One of: auto, halfblocks, sixel, kitty, iterm.
+                        Default: auto.
+```
+
+Use `--graphics` to force a specific renderer when terminal auto-detection
+misses. On terminals such as Alacritty, only halfblocks will render — the
+terminal does not implement Sixel, Kitty, or iTerm2 inline images.
+
+## Keyboard shortcuts
 
 Playback
 
@@ -133,75 +155,91 @@ Other
 | `?` or `h`         | Toggle the help overlay                 |
 | `q`, `Esc`, `Ctrl+C` | Quit                                  |
 
-# Usage
+# Installation
 
-Run without arguments to open your operating system's music directory:
+SparkPlayer is written in Rust. Stable Rust 1.85 or newer is required (the
+crate uses the 2024 edition).
+
+System dependencies on Linux:
+
+- ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on
+  Arch, `alsa-lib-devel` on Fedora) for audio output.
+- FFmpeg development libraries (`libavcodec-dev`, `libavformat-dev`,
+  `libavutil-dev`, `libswscale-dev`, `libswresample-dev` on Debian/Ubuntu,
+  `ffmpeg` on Arch, `ffmpeg-devel` on Fedora) for video decoding.
+- A terminal capable of 24-bit color. Most modern terminals qualify
+  (Alacritty, Kitty, WezTerm, foot, Ghostty, iTerm2, Windows Terminal, ...).
+- Optional: a terminal that implements a graphics protocol (Kitty, Sixel, or
+  iTerm2 inline images) to render embedded album art and video as real graphics
+  instead of colored halfblocks.
+
+SparkPlayer is a Cargo workspace:
+
+- `crates/sparkplayer-core` — platform-agnostic core (UI, visualizers, app
+  state, keymap, and the backend traits), shared by both builds.
+- `crates/sparkplayer-native` — the terminal player (this binary).
+- `crates/sparkplayer-web` — the browser/WASM build (see below).
+
+Build the terminal player from source:
 
 ```sh
-sparkplayer
+git clone https://github.com/dividebysandwich/sparkplayer.git
+cd sparkplayer
+cargo build --release
 ```
 
-A specific file, directory, or playlist can be passed as the only
-positional argument.
+The compiled binary lands in `target/release/sparkplayer`. Copy it somewhere on
+your `PATH` (for example `~/.local/bin/`) or run it in place.
+
+Or install directly from a checkout with cargo:
 
 ```sh
-sparkplayer ~/Music/album/        # play every audio file under the directory, recursively
-sparkplayer song.flac             # play a single file
-sparkplayer playlist.m3u          # load an M3U / M3U8 playlist
-sparkplayer playlist.pls          # load a PLS playlist
+cargo install --path crates/sparkplayer-native
 ```
 
-Supported audio formats: `mp3`, `wav`, `ogg`, `flac`, `m4a`, `aac`,
-`opus`, `wma`. Supported video formats: `mp4`, `mkv`, `avi`, `mov`,
-`webm`, `m4v`. Supported playlist formats: `m3u`, `m3u8`, `pls`.
+## Browser build (WASM)
 
-# Video playback
+SparkPlayer also runs in the browser, rendered with
+[Ratzilla](https://github.com/ratatui/ratzilla) on a canvas (fixed-cell grid),
+using a bundled [Meslo Nerd Font Mono](https://github.com/ryanoasis/nerd-fonts)
+webfont. Audio plays through the Web Audio API (with the visualizer tapping the
+analyser), and video is shown via a real `<video>` element floated over the
+terminal grid. No FFmpeg/SDL/ALSA — the browser does the decoding.
 
-Video files are decoded with FFmpeg on a background thread and rendered
-in the album-art pane in place of cover artwork. Frames are pulled in
-PTS order and sampled against the audio clock, so picture stays
-synchronised with the soundtrack. Seeking, pausing, and skipping work
-the same as for audio-only tracks.
-
-Picture quality depends on the terminal's graphics protocol:
-
-- Kitty, WezTerm, Ghostty, or iTerm2 render true graphics — choose one
-  of these for the best result.
-- Sixel-capable terminals (foot, mlterm, xterm with `--enable-sixel`)
-  also render real images.
-- Other terminals fall back to 24-bit-color halfblocks, which is
-  watchable but coarse.
-
-If audio and video drift apart, use `[` / `]` to nudge the A/V offset in
-25 ms steps (clamped between −500 ms and +2000 ms). Toggling fullscreen
-with `f` scales the video to fill the whole window.
-
-The browser pane on the left lets you navigate the filesystem; pressing
-`Enter` on a directory descends into it, on a playlist file replaces the
-current playlist, and on an audio file appends it to the playlist and
-starts playing it.
-
-Album art is read from embedded tags (ID3 APIC, MP4 `covr`, FLAC PICTURE,
-Vorbis METADATA_BLOCK_PICTURE) and, if none is embedded, from a sidecar
-file in the same directory named `cover`, `folder`, `front`, `albumart`,
-`album`, or `artwork` with a `.jpg`, `.jpeg`, `.png`, or `.webp`
-extension.
-
-Command-line options:
-
-```
---autoplay              Auto-start playback once the playlist is loaded (default: on)
---graphics <PROTOCOL>   Override the album-art graphics protocol.
-                        One of: auto, halfblocks, sixel, kitty, iterm.
-                        Default: auto.
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install trunk            # one-time
+cd crates/sparkplayer-web
+trunk serve                    # dev server at http://localhost:8080
+# or: trunk build --release    # static bundle in crates/sparkplayer-web/dist/
 ```
 
-Use `--graphics` to force a specific renderer when terminal auto-detection
-misses. On terminals such as Alacritty, only halfblocks will render — the terminal does not
-implement Sixel, Kitty, or iTerm2 inline images.
+It chooses its media source at startup from `manifest.json` (served next to the
+page):
+
+- **Web-playlist mode** — if `manifest.json` lists `tracks`, they are loaded and
+  played. Each entry takes a `url` (required) plus optional `title`, `artwork`
+  (cover image URL) and `subtitles` (a `.vtt` URL):
+  `{ "tracks": [ { "url": "https://host/song.mp3", "title": "Song", "artwork": "https://host/cover.jpg", "subtitles": "https://host/song.en.vtt" } ] }`.
+  Hosted media must send permissive CORS headers (the player loads media with
+  `crossorigin="anonymous"`), otherwise the visualizer's analyser reads silence.
+- **Local-file mode** — if `tracks` is empty, use the file picker at the top of
+  the page to play files from your PC. Picked files have their tags and embedded
+  cover art parsed in-browser (via `lofty`), so title/artist/album and album art
+  show just like the native build.
+
+Browsers require a user gesture before audio can start, so the first keypress (or
+file pick) begins playback.
 
 # Motivation
 
-I am a huge fan of VLC, which is a fantastic piece of software. However for over a decaded now I am irritated by the fact that VLC always seems to alter the pitch of music during playback, especially shortly after pressing play, after scrolling, or skipping to the next song. I have turned off any re-sampling feature in the settings but the issue persists. 
+I am a huge fan of VLC, which is a fantastic piece of software. However for over
+a decade now I am irritated by the fact that VLC always seems to alter the pitch
+of music during playback, especially shortly after pressing play, after
+scrolling, or skipping to the next song. I have turned off any re-sampling
+feature in the settings but the issue persists.
 
-After looking through a bunch of terminal based players, here's SparkPlayer. It's lightweight, runs in the terminal, defaults to your music directory and does exactly what I want it to do. Video playback is supported too, for when a music video shows up next to the album.
+After looking through a bunch of terminal based players, here's SparkPlayer.
+It's lightweight, runs in the terminal, defaults to your music directory and
+does exactly what I want it to do. Video playback is supported too, for when a
+music video shows up next to the album.
