@@ -11,13 +11,34 @@ use crate::app::{App, EscapeMenuKind};
 
 use super::palette::{cyan, dim, pink, purple, text, yellow};
 
-pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
-    let w = area.width.min(66);
-    let h = area.height.min(30);
-    let x = area.x + (area.width - w) / 2;
-    let y = area.y + (area.height - h) / 2;
+pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
+    let w = area.width.min(70);
+    let h = area.height.min(34);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect::new(x, y, w, h);
     frame.render_widget(Clear, rect);
+
+    let body = help_lines();
+
+    // Inner content height: minus the top/bottom borders (2) and the top/bottom
+    // padding (2). Clamp the scroll offset so the last page can't scroll past
+    // the end (this is also where `End` / u16::MAX resolves to the real bottom).
+    let visible = h.saturating_sub(4);
+    let max_scroll = (body.len() as u16).saturating_sub(visible);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+    let scroll = app.help_scroll;
+
+    let more_above = scroll > 0;
+    let more_below = scroll < max_scroll;
+    let hint = match (more_above, more_below) {
+        (false, false) => " ↑↓/PgUp/PgDn scroll • Esc close ".to_string(),
+        _ => format!(
+            " {}↑↓/PgUp/PgDn scroll{} • Esc close ",
+            if more_above { "▲ " } else { "" },
+            if more_below { " ▼" } else { "" },
+        ),
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -28,58 +49,93 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
                 .fg(yellow())
                 .add_modifier(Modifier::BOLD),
         )))
+        .title_bottom(Line::from(Span::styled(
+            hint,
+            Style::default().fg(dim()),
+        )))
         .padding(Padding::new(2, 2, 1, 1))
         .style(Style::default().bg(Color::Rgb(15, 10, 30)));
 
-    let body = vec![
-        Line::from(Span::styled(
-            "Playback",
-            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
-        )),
+    frame.render_widget(
+        Paragraph::new(body).block(block).scroll((scroll, 0)),
+        rect,
+    );
+}
+
+fn section(title: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        title,
+        Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// The full help text. Kept well within the overlay's inner width (~62 cols)
+/// so lines never wrap and the scroll offset maps one-to-one to source lines.
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
+        section("Welcome"),
+        Line::from("  SparkPlayer is an easy, fun terminal music player for"),
+        Line::from("  your on-disk library. It opens to your music folder and"),
+        Line::from("  plays just about anything — no library import needed."),
+        Line::from(""),
+        section("Getting around"),
+        Line::from("  The left side has your playlist (top) and a file"),
+        Line::from("  browser (bottom). Press Tab to move focus between them."),
+        Line::from("  In the browser, walk into folders with Enter and queue"),
+        Line::from("  what you find. The right side shows now-playing info,"),
+        Line::from("  album art or video, and the visualizer."),
+        Line::from(""),
+        section("Managing the playlist"),
+        Line::from("  Enter          browser: open folder / load playlist /"),
+        Line::from("                 play file   •   playlist: play selection"),
+        Line::from("  a              queue the highlighted browser item"),
+        Line::from("  Shift+A        queue every audio file under the dir"),
+        Line::from("                 (recursive)"),
+        Line::from("  Shift+C        clear the playlist (stops playback)"),
+        Line::from("  s              shuffle the remaining tracks"),
+        Line::from("  r              cycle repeat (off / all / one)"),
+        Line::from(""),
+        section("Supported formats"),
+        Line::from("  Audio     mp3  wav  ogg  flac  m4a  aac  opus  wma"),
+        Line::from("  Video     mp4  mkv  avi  mov  webm  m4v"),
+        Line::from("  Playlist  m3u  m3u8  pls"),
+        Line::from("  Album art is read from embedded tags, or a cover /"),
+        Line::from("  folder / front image sitting next to the track."),
+        Line::from(""),
+        section("Playback"),
         Line::from("  Space          play / pause"),
         Line::from("  n / p          next / previous track"),
         Line::from("  ← / →          seek -10s / +10s"),
-        Line::from("  Ctrl+← / Ctrl+→  seek -30s / +30s"),
+        Line::from("  Ctrl+← / →     seek -30s / +30s"),
         Line::from("  + / = / -      volume up / up / down"),
         Line::from("  [ / ]          A/V sync offset -25ms / +25ms (video)"),
         Line::from("  c              cycle subtitle track (video)"),
-        Line::from("  Enter          play selection"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Navigation",
-            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
-        )),
+        section("Navigation"),
         Line::from("  ↑ / ↓          move selection"),
         Line::from("  PgUp / PgDn    page selection"),
         Line::from("  Home / End     jump to first / last"),
         Line::from("  Tab            switch focus (playlist ↔ browser)"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Modes",
-            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
-        )),
+        section("Look & feel"),
         Line::from("  v              cycle visualizer:"),
         Line::from("                  FFT bars → waveform → scrolling →"),
         Line::from("                  spectrogram → stereo X/Y →"),
         Line::from("                  spectrum 3D → cassette tape"),
         Line::from("  t              cycle color theme"),
-        Line::from("  f              cycle display: normal → fullscreen → video window"),
-        Line::from("  r              cycle repeat (off / all / one)"),
-        Line::from("  s              shuffle remaining tracks"),
+        Line::from("  f              cycle display: normal → fullscreen →"),
+        Line::from("                 video window"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Playlist",
-            Style::default().fg(cyan()).add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  a              queue the highlighted browser item"),
-        Line::from("  Shift+A        queue every audio file under the current dir"),
-        Line::from("  Shift+C        clear the playlist (stops playback)"),
+        section("Video"),
+        Line::from("  Video plays right in the album-art pane, synced to the"),
+        Line::from("  audio. Terminals with a graphics protocol (Kitty,"),
+        Line::from("  Sixel, iTerm2) show true images; others use colored"),
+        Line::from("  halfblocks. Press f to fill the window."),
         Line::from(""),
+        section("Other"),
         Line::from("  Esc            open menu (volume, subtitle, A/V, …)"),
         Line::from("  ? or h         this help    •    q    quit"),
-    ];
-
-    frame.render_widget(Paragraph::new(body).block(block), rect);
+    ]
 }
 
 pub(super) fn draw_escape_menu(frame: &mut Frame, area: Rect, app: &App) {

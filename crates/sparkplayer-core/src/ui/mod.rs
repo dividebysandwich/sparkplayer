@@ -42,7 +42,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_visualizer(frame, area, app);
         }
         if app.show_help {
-            draw_help(frame, area);
+            draw_help(frame, area, app);
         }
         if app.show_escape_menu {
             draw_escape_menu(frame, area, app);
@@ -103,7 +103,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_footer(frame, outer[1], app);
 
     if app.show_help {
-        draw_help(frame, area);
+        draw_help(frame, area, app);
     }
     if app.show_escape_menu {
         draw_escape_menu(frame, area, app);

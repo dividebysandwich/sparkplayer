@@ -51,6 +51,7 @@ pub enum EscapeMenuKind {
     VideoWindow,
     Repeat,
     Shuffle,
+    Help,
     Github,
     Separator,
     Quit,
@@ -137,6 +138,9 @@ pub struct App {
 
     pub should_quit: bool,
     pub show_help: bool,
+    /// Vertical scroll offset (in lines) of the help overlay. Clamped to the
+    /// content height during rendering.
+    pub help_scroll: u16,
     pub show_escape_menu: bool,
     pub escape_menu_selected: usize,
     pub fullscreen_vis: bool,
@@ -224,6 +228,7 @@ impl App {
             preferred_subtitle_applied: false,
             should_quit: false,
             show_help: false,
+            help_scroll: 0,
             show_escape_menu: false,
             escape_menu_selected: 0,
             fullscreen_vis: false,
@@ -923,6 +928,12 @@ impl App {
                 value: if self.shuffle { "On" } else { "Off" }.to_string(),
             },
         ];
+        items.push(EscapeMenuItem {
+            kind: EscapeMenuKind::Help,
+            enabled: true,
+            label: "Help",
+            value: "View ↗".to_string(),
+        });
         if self.url_open_supported {
             items.push(EscapeMenuItem {
                 kind: EscapeMenuKind::Github,
@@ -1011,7 +1022,10 @@ impl App {
             EscapeMenuKind::VideoWindow => self.toggle_video_window(),
             EscapeMenuKind::Repeat => self.cycle_repeat(),
             EscapeMenuKind::Shuffle => self.toggle_shuffle(),
-            EscapeMenuKind::Github | EscapeMenuKind::Quit | EscapeMenuKind::Separator => {}
+            EscapeMenuKind::Help
+            | EscapeMenuKind::Github
+            | EscapeMenuKind::Quit
+            | EscapeMenuKind::Separator => {}
         }
         Ok(())
     }
@@ -1033,6 +1047,11 @@ impl App {
             }
             EscapeMenuKind::Github => {
                 self.pending_url_open = Some(GITHUB_URL.to_string());
+                return Ok(true);
+            }
+            EscapeMenuKind::Help => {
+                self.show_help = true;
+                self.help_scroll = 0;
                 return Ok(true);
             }
             EscapeMenuKind::Fullscreen => self.toggle_fullscreen(),
@@ -1076,6 +1095,13 @@ impl App {
                 | CoreKey::Char('?')
                 | CoreKey::Char('h')
                 | CoreKey::Char('q') => self.show_help = false,
+                CoreKey::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                CoreKey::Down => self.help_scroll = self.help_scroll.saturating_add(1),
+                CoreKey::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                CoreKey::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
+                CoreKey::Home => self.help_scroll = 0,
+                // Clamped to the content height when the overlay is rendered.
+                CoreKey::End => self.help_scroll = u16::MAX,
                 _ => {}
             }
             return Ok(());
@@ -1118,7 +1144,10 @@ impl App {
             CoreKey::Char('A') => self.queue_browser_directory(),
             CoreKey::Char('C') => self.clear_playlist(),
             CoreKey::Char('c') => self.cycle_subtitle_track(),
-            CoreKey::Char('?') | CoreKey::Char('h') => self.show_help = true,
+            CoreKey::Char('?') | CoreKey::Char('h') => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             CoreKey::Tab => self.focus_next(),
             CoreKey::Up => self.move_selection(-1),
             CoreKey::Down => self.move_selection(1),
