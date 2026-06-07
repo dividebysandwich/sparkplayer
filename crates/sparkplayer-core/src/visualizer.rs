@@ -11,11 +11,15 @@ const WAVE_SIZE: usize = 2048;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum VisMode {
     Spectrum,
+    MirrorBars,
+    Radial,
     Waveform,
     ScrollingWaveform,
     Spectrogram,
     Lissajous,
+    Vu,
     Spectrum3D,
+    Plasma,
     Cassette,
 }
 
@@ -23,56 +27,76 @@ impl VisMode {
     pub fn label(&self) -> &'static str {
         match self {
             VisMode::Spectrum => "FFT Bars",
+            VisMode::MirrorBars => "Mirror Bars",
+            VisMode::Radial => "Radial",
             VisMode::Waveform => "Waveform",
             VisMode::ScrollingWaveform => "Scrolling Wave",
             VisMode::Spectrogram => "Spectrogram",
             VisMode::Lissajous => "Stereo X/Y",
+            VisMode::Vu => "VU Meters",
             VisMode::Spectrum3D => "Spectrum 3D",
+            VisMode::Plasma => "Plasma",
             VisMode::Cassette => "Cassette Tape",
         }
     }
     pub fn cycle(self) -> Self {
         match self {
-            VisMode::Spectrum => VisMode::Waveform,
+            VisMode::Spectrum => VisMode::MirrorBars,
+            VisMode::MirrorBars => VisMode::Radial,
+            VisMode::Radial => VisMode::Waveform,
             VisMode::Waveform => VisMode::ScrollingWaveform,
             VisMode::ScrollingWaveform => VisMode::Spectrogram,
             VisMode::Spectrogram => VisMode::Lissajous,
-            VisMode::Lissajous => VisMode::Spectrum3D,
-            VisMode::Spectrum3D => VisMode::Cassette,
+            VisMode::Lissajous => VisMode::Vu,
+            VisMode::Vu => VisMode::Spectrum3D,
+            VisMode::Spectrum3D => VisMode::Plasma,
+            VisMode::Plasma => VisMode::Cassette,
             VisMode::Cassette => VisMode::Spectrum,
         }
     }
     pub fn cycle_back(self) -> Self {
         match self {
             VisMode::Spectrum => VisMode::Cassette,
-            VisMode::Waveform => VisMode::Spectrum,
+            VisMode::MirrorBars => VisMode::Spectrum,
+            VisMode::Radial => VisMode::MirrorBars,
+            VisMode::Waveform => VisMode::Radial,
             VisMode::ScrollingWaveform => VisMode::Waveform,
             VisMode::Spectrogram => VisMode::ScrollingWaveform,
             VisMode::Lissajous => VisMode::Spectrogram,
-            VisMode::Spectrum3D => VisMode::Lissajous,
-            VisMode::Cassette => VisMode::Spectrum3D,
+            VisMode::Vu => VisMode::Lissajous,
+            VisMode::Spectrum3D => VisMode::Vu,
+            VisMode::Plasma => VisMode::Spectrum3D,
+            VisMode::Cassette => VisMode::Plasma,
         }
     }
     /// Stable identifier used in the persisted config file.
     pub fn name(&self) -> &'static str {
         match self {
             VisMode::Spectrum => "spectrum",
+            VisMode::MirrorBars => "spectrum-mirror",
+            VisMode::Radial => "radial",
             VisMode::Waveform => "waveform",
             VisMode::ScrollingWaveform => "scrolling-wave",
             VisMode::Spectrogram => "spectrogram",
             VisMode::Lissajous => "lissajous",
+            VisMode::Vu => "vu",
             VisMode::Spectrum3D => "spectrum-3d",
+            VisMode::Plasma => "plasma",
             VisMode::Cassette => "cassette",
         }
     }
     pub fn from_name(s: &str) -> Option<Self> {
         Some(match s {
             "spectrum" => VisMode::Spectrum,
+            "spectrum-mirror" => VisMode::MirrorBars,
+            "radial" => VisMode::Radial,
             "waveform" => VisMode::Waveform,
             "scrolling-wave" => VisMode::ScrollingWaveform,
             "spectrogram" => VisMode::Spectrogram,
             "lissajous" => VisMode::Lissajous,
+            "vu" => VisMode::Vu,
             "spectrum-3d" => VisMode::Spectrum3D,
+            "plasma" => VisMode::Plasma,
             "cassette" => VisMode::Cassette,
             _ => return None,
         })
@@ -96,7 +120,26 @@ pub struct Visualizer {
     last_lissajous: Vec<(f32, f32)>,
     cassette_phase: f32,
     last_consumed_for_cassette: u64,
+    /// Falling peak-hold caps for the mirrored bars.
+    mirror_peaks: Vec<f32>,
+    last_consumed_for_mirror: u64,
+    /// Falling L/R peak-hold markers for the VU meters.
+    vu_peak_hold: [f32; 2],
+    last_consumed_for_vu: u64,
+    /// Animation phase for the plasma field.
+    plasma_phase: f32,
+    last_consumed_for_plasma: u64,
     pub mode: VisMode,
+}
+
+/// Stereo level readout for the VU meter visualizer.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Levels {
+    pub rms: [f32; 2],
+    pub peak: [f32; 2],
+    /// Inter-channel correlation in [-1, 1] (1 = mono, 0 = uncorrelated,
+    /// -1 = out of phase).
+    pub correlation: f32,
 }
 
 impl Visualizer {
@@ -127,24 +170,38 @@ impl Visualizer {
             last_lissajous: Vec::new(),
             cassette_phase: 0.0,
             last_consumed_for_cassette: 0,
+            mirror_peaks: Vec::new(),
+            last_consumed_for_mirror: 0,
+            vu_peak_hold: [0.0, 0.0],
+            last_consumed_for_vu: 0,
+            plasma_phase: 0.0,
+            last_consumed_for_plasma: 0,
             mode: VisMode::Spectrum,
         }
+    }
+
+    /// Seconds of audio played since `watermark` was last updated, syncing the
+    /// watermark. Returns 0 (and just resyncs) when playback is paused, so any
+    /// animation or peak decay driven by this freezes cleanly on pause. This is
+    /// the shared core of the cassette spindle, plasma, and peak-hold timing.
+    fn advance_dt(watermark: &mut u64, tap: &SampleBuffer, active: bool) -> f32 {
+        let consumed = tap.samples_consumed();
+        let prev = *watermark;
+        *watermark = consumed;
+        if !active {
+            return 0.0;
+        }
+        let channels = tap.channels().max(1) as u64;
+        let sr = tap.sample_rate().max(1) as f32;
+        let new_frames = consumed.saturating_sub(prev) / channels;
+        new_frames as f32 / sr
     }
 
     /// Advance the cassette spindle phase based on samples played since the
     /// last call, returning the current angle in radians. Holds steady when
     /// playback is paused.
     pub fn cassette_phase(&mut self, tap: &SampleBuffer, active: bool) -> f32 {
-        let consumed = tap.samples_consumed();
-        if !active {
-            self.last_consumed_for_cassette = consumed;
-            return self.cassette_phase;
-        }
-        let channels = tap.channels().max(1) as u64;
-        let sr = tap.sample_rate().max(1) as f32;
-        let new_frames = consumed.saturating_sub(self.last_consumed_for_cassette) / channels;
-        self.last_consumed_for_cassette = consumed;
-        let dt = new_frames as f32 / sr;
+        let dt = Self::advance_dt(&mut self.last_consumed_for_cassette, tap, active);
         // Roughly one revolution per five seconds — slow enough that the eye
         // tracks individual spokes via subpixel steps.
         let revs_per_sec = 0.2;
@@ -407,10 +464,170 @@ impl Visualizer {
         self.spectrum_3d_rows.iter().cloned().collect()
     }
 
+    /// Smoothed spectrum bars plus falling peak-hold caps, for the mirrored
+    /// visualizer. Caps snap up to the live bar then sag at a fixed rate.
+    pub fn mirror_bars(
+        &mut self,
+        tap: &SampleBuffer,
+        bins: usize,
+        sample_rate: u32,
+        active: bool,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let bars = self.spectrum(tap, bins, sample_rate, active);
+        if self.mirror_peaks.len() != bins {
+            self.mirror_peaks = bars.clone();
+        }
+        let dt = Self::advance_dt(&mut self.last_consumed_for_mirror, tap, active);
+        let decay = dt * 0.9;
+        for (peak, &bar) in self.mirror_peaks.iter_mut().zip(bars.iter()) {
+            *peak = if bar >= *peak {
+                bar
+            } else {
+                (*peak - decay).max(bar)
+            };
+        }
+        (bars, self.mirror_peaks.clone())
+    }
+
+    /// Stereo RMS / peak levels and correlation for the VU meters, with falling
+    /// peak-hold markers (frozen on pause).
+    pub fn levels(&mut self, tap: &SampleBuffer, active: bool) -> Levels {
+        const N: usize = 2048;
+        if self.stereo_samples.len() < N {
+            self.stereo_samples.resize(N, (0.0, 0.0));
+        }
+        let frames = tap.latest_stereo(&mut self.stereo_samples[..N]);
+        let used = frames.min(N);
+        let measured = compute_levels(&self.stereo_samples[..used]);
+        let dt = Self::advance_dt(&mut self.last_consumed_for_vu, tap, active);
+        let decay = dt * 0.6;
+        for c in 0..2 {
+            if measured.peak[c] >= self.vu_peak_hold[c] {
+                self.vu_peak_hold[c] = measured.peak[c];
+            } else {
+                self.vu_peak_hold[c] = (self.vu_peak_hold[c] - decay).max(measured.peak[c]);
+            }
+        }
+        Levels {
+            rms: measured.rms,
+            peak: self.vu_peak_hold,
+            correlation: measured.correlation,
+        }
+    }
+
+    /// Advance the plasma phase and return it alongside coarse bass/mid/treble
+    /// energies. Phase drift speeds up with overall energy; both freeze on pause.
+    pub fn plasma_state(
+        &mut self,
+        tap: &SampleBuffer,
+        sample_rate: u32,
+        active: bool,
+    ) -> (f32, [f32; 3]) {
+        let bands = if active {
+            self.compute_fft(tap);
+            let b = self.log_bin_db(3, sample_rate, -70.0, 65.0);
+            [b[0], b[1], b[2]]
+        } else {
+            [0.0, 0.0, 0.0]
+        };
+        let dt = Self::advance_dt(&mut self.last_consumed_for_plasma, tap, active);
+        let energy = (bands[0] + bands[1] + bands[2]) / 3.0;
+        self.plasma_phase += dt * (0.6 + energy * 2.5);
+        let tau = std::f32::consts::TAU;
+        if self.plasma_phase > tau * 1024.0 {
+            self.plasma_phase = self.plasma_phase.rem_euclid(tau);
+        }
+        (self.plasma_phase, bands)
+    }
+
     pub fn toggle_mode(&mut self) {
         self.mode = self.mode.cycle();
     }
     pub fn toggle_mode_back(&mut self) {
         self.mode = self.mode.cycle_back();
+    }
+}
+
+/// Per-channel RMS and peak plus inter-channel correlation for a block of
+/// stereo frames. Pure (no `self`) so it can be unit-tested directly.
+fn compute_levels(frames: &[(f32, f32)]) -> Levels {
+    if frames.is_empty() {
+        return Levels::default();
+    }
+    let n = frames.len() as f32;
+    let mut sum_l2 = 0.0f32;
+    let mut sum_r2 = 0.0f32;
+    let mut sum_lr = 0.0f32;
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    for &(l, r) in frames {
+        sum_l2 += l * l;
+        sum_r2 += r * r;
+        sum_lr += l * r;
+        peak_l = peak_l.max(l.abs());
+        peak_r = peak_r.max(r.abs());
+    }
+    let denom = (sum_l2 * sum_r2).sqrt();
+    let correlation = if denom > 1e-9 {
+        (sum_lr / denom).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    Levels {
+        rms: [(sum_l2 / n).sqrt().min(1.0), (sum_r2 / n).sqrt().min(1.0)],
+        peak: [peak_l.min(1.0), peak_r.min(1.0)],
+        correlation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn correlation_in_phase_is_one() {
+        let frames: Vec<(f32, f32)> = (0..512)
+            .map(|i| {
+                let s = (i as f32 * 0.1).sin();
+                (s, s)
+            })
+            .collect();
+        let lv = compute_levels(&frames);
+        assert!((lv.correlation - 1.0).abs() < 1e-3, "{}", lv.correlation);
+    }
+
+    #[test]
+    fn correlation_out_of_phase_is_minus_one() {
+        let frames: Vec<(f32, f32)> = (0..512)
+            .map(|i| {
+                let s = (i as f32 * 0.1).sin();
+                (s, -s)
+            })
+            .collect();
+        let lv = compute_levels(&frames);
+        assert!((lv.correlation + 1.0).abs() < 1e-3, "{}", lv.correlation);
+    }
+
+    #[test]
+    fn silence_has_zero_levels() {
+        let lv = compute_levels(&[(0.0, 0.0); 256]);
+        assert_eq!(lv.rms, [0.0, 0.0]);
+        assert_eq!(lv.peak, [0.0, 0.0]);
+        assert_eq!(lv.correlation, 0.0);
+    }
+
+    #[test]
+    fn rms_and_peak_of_full_scale_tone() {
+        let frames: Vec<(f32, f32)> = (0..1024)
+            .map(|i| {
+                let s = (i as f32 * 0.2).sin();
+                (s, s * 0.5)
+            })
+            .collect();
+        let lv = compute_levels(&frames);
+        // RMS of a unit sine ≈ 0.707; right channel is half amplitude.
+        assert!((lv.rms[0] - 0.707).abs() < 0.05, "{}", lv.rms[0]);
+        assert!((lv.rms[1] - 0.354).abs() < 0.05, "{}", lv.rms[1]);
+        assert!(lv.peak[0] <= 1.0 && lv.peak[0] > 0.9);
     }
 }

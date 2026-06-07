@@ -10,16 +10,16 @@ A fun, no-nonsense terminal media player built with Ratatui.
 
 ## Overview
 
-SparkPlayer is a music player you'll want to use every day. Point it
-at your on-disk music library and it just works: it opens to your music
-directory, browses your folders, plays virtually every audio format you own, and
+SparkPlayer is a media player for every day use that's fun to use and looks nice. Point it
+at your on-disk media library and it just works: it opens to your music or video
+directory, browses your folders, plays virtually every media  format you own, and
 keeps your playlist a single keypress away. No setup ceremony, no library
 import, no fuss.
 
-It lives entirely in the terminal, but it doesn't look or feel like a
-bare-bones tool. You get colorful audio visualizers (FFT bars, waveforms,
-spectrograms, a stereo X/Y scope, a 3D spectrum, even a spinning cassette
-tape), embedded album art rendered as real graphics, and — yes — video
+Enjoy eleven colorful audio visualizers (FFT bars, mirrored
+bars, a radial spectrum, waveforms, spectrograms, a stereo X/Y scope, VU meters,
+a 3D spectrum, an audio-reactive plasma, even a spinning cassette tape),
+embedded album art rendered as real graphics, and video
 playback right in the terminal. On terminals with a graphics protocol you get
 true images; everywhere else SparkPlayer falls back to 24-bit-color halfblocks
 so it still works, anywhere.
@@ -156,7 +156,7 @@ Modes
 
 | Key                | Action                                  |
 |--------------------|-----------------------------------------|
-| `v`                | Cycle visualizer: FFT bars, waveform, scrolling waveform, spectrogram, stereo X/Y, spectrum 3D, cassette tape |
+| `v`                | Cycle visualizer: FFT bars, mirror bars, radial, waveform, scrolling waveform, spectrogram, stereo X/Y, VU meters, spectrum 3D, plasma, cassette tape |
 | `f`                | Toggle fullscreen visualizer            |
 | `r`                | Cycle repeat mode: Off, All, One        |
 | `s`                | Shuffle the remaining tracks            |
