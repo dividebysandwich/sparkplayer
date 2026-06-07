@@ -34,6 +34,8 @@ pub enum CoreKey {
     Tab,
     Enter,
     Esc,
+    Backspace,
+    Delete,
     Other,
 }
 
@@ -156,6 +158,11 @@ pub trait MediaLibrary {
     fn read_metadata(&self, source: &TrackRef) -> TrackMeta;
     fn find_cover(&self, source: &TrackRef) -> Option<Vec<u8>>;
     fn load_subtitles(&self, source: &TrackRef) -> SubtitleSet;
+    /// Write `tracks` to an M3U playlist file at `path`. Default: unsupported
+    /// (web has no filesystem to write to).
+    fn save_playlist(&self, _path: &Path, _tracks: &[Track]) -> anyhow::Result<()> {
+        anyhow::bail!("saving playlists is not supported on this platform")
+    }
 }
 
 /// Persisted settings storage. Native = config file; web = `localStorage`.

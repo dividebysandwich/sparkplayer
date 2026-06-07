@@ -334,6 +334,8 @@ fn map_keyboard_event(ev: &web_sys::KeyboardEvent) -> CoreKeyEvent {
         "End" => CoreKey::End,
         "PageUp" => CoreKey::PageUp,
         "PageDown" => CoreKey::PageDown,
+        "Backspace" => CoreKey::Backspace,
+        "Delete" => CoreKey::Delete,
         _ => {
             let mut chars = key.chars();
             match (chars.next(), chars.next()) {
@@ -357,6 +359,8 @@ fn should_prevent_default(code: CoreKey) -> bool {
             | CoreKey::PageDown
             | CoreKey::Home
             | CoreKey::End
+            | CoreKey::Backspace
+            | CoreKey::Delete
             | CoreKey::Char(' ')
     )
 }

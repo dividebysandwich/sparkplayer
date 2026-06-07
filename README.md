@@ -29,7 +29,8 @@ Highlights:
 - **Easy to use** — opens to your music directory, browse-and-play, helpful
   help overlay (`?`), sensible keyboard shortcuts.
 - **Great daily driver** — lightweight, fast, and built to be your main player
-  for a local music library.
+  for a local music library. Filter long lists with `/`, edit and save your
+  playlist, and it picks up where you left off next time you open it.
 - **Lots of formats** — common audio, video, and playlist formats all
   supported out of the box.
 - **Graphics in the terminal** — album art and video as real images on capable
@@ -64,6 +65,18 @@ sparkplayer playlist.pls          # load a PLS playlist
 The browser pane on the left lets you navigate the filesystem; pressing `Enter`
 on a directory descends into it, on a playlist file replaces the current
 playlist, and on an audio file appends it to the playlist and starts playing it.
+
+Press `/` to filter the focused list — handy for finding a track or folder in a
+large library; `Esc` clears the filter. Curate the playlist in place with `d`
+(remove) and `Ctrl+Up`/`Ctrl+Down` (reorder), and write it out with `w`.
+
+### Sessions
+
+Launched with no arguments, SparkPlayer reopens where you left off: the same
+browser directory and playlist, the track and position that were playing, and
+your repeat/shuffle modes. Pass a path explicitly to start fresh from it
+instead. (In the browser build, settings and repeat/shuffle persist via
+`localStorage`; locally-picked files can't be restored across reloads.)
 
 ### Album art
 
@@ -137,6 +150,7 @@ Navigation
 | `PgUp` / `PgDn`    | Page through the focused list           |
 | `Home` / `End`     | Jump to first / last entry              |
 | `Tab`              | Switch focus between playlist and browser |
+| `/`                | Filter the focused list (type to narrow, `Esc` clears) |
 
 Modes
 
@@ -153,6 +167,9 @@ Playlist
 |--------------------|-----------------------------------------|
 | `a`                | Queue the highlighted browser item (file, directory, or playlist) |
 | `Shift+A`          | Queue every audio file under the currently browsed directory (recursive) |
+| `d` / `Delete`     | Remove the highlighted track from the playlist |
+| `Ctrl+Up` / `Ctrl+Down` | Move the highlighted track up / down |
+| `w`                | Save the playlist to an `.m3u` file in the browsed directory |
 | `Shift+C`          | Clear the playlist and stop playback    |
 
 Other

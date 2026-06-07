@@ -21,6 +21,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use sparkplayer_core::backend::{ConfigStore, CoreKey, CoreKeyEvent};
+use sparkplayer_core::library::Track;
 use sparkplayer_core::{App, ui};
 
 use crate::audio::AudioPlayer;
@@ -100,6 +101,8 @@ pub fn map_key(code: KeyCode, mods: KeyModifiers) -> CoreKeyEvent {
         KeyCode::Tab => CoreKey::Tab,
         KeyCode::Enter => CoreKey::Enter,
         KeyCode::Esc => CoreKey::Esc,
+        KeyCode::Backspace => CoreKey::Backspace,
+        KeyCode::Delete => CoreKey::Delete,
         _ => CoreKey::Other,
     };
     CoreKeyEvent::with_ctrl(core, mods.contains(KeyModifiers::CONTROL))
@@ -108,23 +111,38 @@ pub fn map_key(code: KeyCode, mods: KeyModifiers) -> CoreKeyEvent {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let target_path = cli
-        .path
-        .clone()
-        .unwrap_or_else(library_native::default_music_dir);
-
-    let tracks = library_native::load_tracks(&target_path).unwrap_or_default();
-    let initial_dir = if target_path.is_dir() {
-        target_path.clone()
-    } else {
-        target_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(library_native::default_music_dir)
-    };
-
     let config = NativeConfigStore;
     let cfg = config.load();
+
+    // With an explicit path, behave as before. Without one, resume the last
+    // session: restore the saved playlist and browser directory.
+    let resuming = cli.path.is_none();
+    let (tracks, initial_dir) = if let Some(path) = cli.path.clone() {
+        let tracks = library_native::load_tracks(&path).unwrap_or_default();
+        let dir = if path.is_dir() {
+            path
+        } else {
+            path.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(library_native::default_music_dir)
+        };
+        (tracks, dir)
+    } else {
+        let tracks: Vec<_> = cfg
+            .playlist
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .map(Track::from_path)
+            .collect();
+        let dir = cfg
+            .last_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(library_native::default_music_dir);
+        (tracks, dir)
+    };
 
     let mut terminal = setup_terminal().context("setting up terminal")?;
     // Picker queries the terminal — must happen after raw mode is enabled so
@@ -151,11 +169,28 @@ fn main() -> Result<()> {
     }
 
     if cli.autoplay && !app.tracks.is_empty() {
-        let _ = app.play_index(0);
+        // When resuming, restart the track that was playing and seek back to
+        // where it left off; otherwise start at the top.
+        let start_idx = if resuming {
+            cfg.playing_index.filter(|&i| i < app.tracks.len())
+        } else {
+            None
+        };
+        match start_idx {
+            Some(idx) => {
+                if app.play_index(idx).is_ok() && cfg.position_secs > 1.0 {
+                    app.seek_to_secs(cfg.position_secs);
+                }
+            }
+            None => {
+                let _ = app.play_index(0);
+            }
+        }
     }
 
     let res = run_loop(&mut terminal, &mut app);
     restore_terminal(&mut terminal).ok();
+    app.save_session();
     res
 }
 

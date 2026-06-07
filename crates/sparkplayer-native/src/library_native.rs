@@ -78,6 +78,23 @@ impl MediaLibrary for NativeLibrary {
             TrackRef::Url(..) => SubtitleSet::default(),
         }
     }
+
+    fn save_playlist(&self, path: &Path, tracks: &[Track]) -> Result<()> {
+        save_playlist(path, tracks)
+    }
+}
+
+/// Write `tracks` to an M3U file: an `#EXTM3U` header followed by one absolute
+/// path per filesystem-backed track. URL tracks (none on native) are skipped.
+pub fn save_playlist(path: &Path, tracks: &[Track]) -> Result<()> {
+    let mut out = String::from("#EXTM3U\n");
+    for t in tracks {
+        if let TrackRef::Path(p) = &t.source {
+            out.push_str(&p.to_string_lossy());
+            out.push('\n');
+        }
+    }
+    fs::write(path, out).with_context(|| format!("writing playlist {}", path.display()))
 }
 
 /// Load a set of tracks from a path: a single file, a directory (scanned
@@ -174,4 +191,29 @@ pub fn default_music_dir() -> PathBuf {
     dirs::audio_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_playlist_round_trips_via_parse_m3u() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("sparkplayer-test-{}.m3u", std::process::id()));
+        let tracks = vec![
+            Track::from_path(dir.join("one.flac")),
+            Track::from_path(dir.join("two.mp3")),
+        ];
+        save_playlist(&file, &tracks).expect("save");
+
+        let content = fs::read_to_string(&file).expect("read");
+        assert!(content.starts_with("#EXTM3U\n"));
+        let parsed = library::parse_m3u(&content);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], dir.join("one.flac"));
+        assert_eq!(parsed[1], dir.join("two.mp3"));
+
+        fs::remove_file(&file).ok();
+    }
 }

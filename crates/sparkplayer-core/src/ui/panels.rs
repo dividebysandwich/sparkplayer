@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap};
 
-use crate::app::{App, FocusPane};
+use crate::app::{App, FocusPane, InputMode};
 
 use super::palette::{cyan, dim, green, lerp, panel_bg, pink, purple, red, text, yellow};
 
@@ -17,11 +17,11 @@ pub(super) fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == FocusPane::Playlist;
     let border = if focused { pink() } else { purple() };
 
-    let items: Vec<ListItem> = app
-        .tracks
+    let vis = app.visible_indices(FocusPane::Playlist);
+    let items: Vec<ListItem> = vis
         .iter()
-        .enumerate()
-        .map(|(i, t)| {
+        .map(|&i| {
+            let t = &app.tracks[i];
             let playing = Some(i) == app.playing_index;
             let prefix = if playing { "▶ " } else { "  " };
             let style = if playing {
@@ -38,7 +38,25 @@ pub(super) fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
-    let title = format!(" ♪ Playlist ({}) ", app.tracks.len());
+    // The ListState selection indexes the *rendered* (filtered) list, so map the
+    // full-list cursor to its position among the visible rows.
+    let sel_pos = vis.iter().position(|&i| i == app.selected);
+    app.playlist_state.select(if items.is_empty() { None } else { sel_pos.or(Some(0)) });
+
+    let playlist_filter = app.filter_pane == FocusPane::Playlist && !app.filter_query.is_empty();
+    let title = if app.input_mode == InputMode::SavePlaylist {
+        format!(" 💾 Save as: {}▏ ", app.input_buffer)
+    } else if playlist_filter {
+        format!(
+            " ♪ Playlist ({}/{})  /{}{} ",
+            vis.len(),
+            app.tracks.len(),
+            app.filter_query,
+            if app.input_mode == InputMode::Filter { "▏" } else { "" }
+        )
+    } else {
+        format!(" ♪ Playlist ({}) ", app.tracks.len())
+    };
     let list = List::new(items)
         .block(
             Block::default()
@@ -70,11 +88,11 @@ pub(super) fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
     let cwd = app.browser_dir.display().to_string();
     let has_parent = app.browser_dir.parent().is_some();
 
-    let items: Vec<ListItem> = app
-        .browser_entries
+    let vis = app.visible_indices(FocusPane::Browser);
+    let items: Vec<ListItem> = vis
         .iter()
-        .enumerate()
-        .map(|(i, p)| {
+        .map(|&i| {
+            let p = &app.browser_entries[i];
             let parent = i == 0 && has_parent;
             let label = if parent {
                 String::from("⤴ ..")
@@ -102,13 +120,27 @@ pub(super) fn draw_browser(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
+    let sel_pos = vis.iter().position(|&i| i == app.browser_selected);
+    app.browser_state.select(if items.is_empty() { None } else { sel_pos.or(Some(0)) });
+
+    let browser_filter = app.filter_pane == FocusPane::Browser && !app.filter_query.is_empty();
+    let title = if browser_filter {
+        format!(
+            " 📂 {}  /{}{} ",
+            truncate_path(&cwd, area.width as usize / 2),
+            app.filter_query,
+            if app.input_mode == InputMode::Filter { "▏" } else { "" }
+        )
+    } else {
+        format!(" 📂 {} ", truncate_path(&cwd, area.width as usize))
+    };
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border))
                 .title(Line::from(Span::styled(
-                    format!(" 📂 {} ", truncate_path(&cwd, area.width as usize)),
+                    title,
                     Style::default()
                         .fg(cyan())
                         .add_modifier(Modifier::BOLD),

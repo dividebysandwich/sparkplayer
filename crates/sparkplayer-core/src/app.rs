@@ -40,6 +40,16 @@ pub enum FocusPane {
     Browser,
 }
 
+/// Whether the app is capturing typed text, and for what. In `Filter` mode
+/// keystrokes edit the live `filter_query`; in `SavePlaylist` mode they edit the
+/// `input_buffer` (the filename to write).
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum InputMode {
+    Normal,
+    Filter,
+    SavePlaylist,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum EscapeMenuKind {
     Volume,
@@ -113,6 +123,15 @@ pub struct App {
     pub browser_state: ListState,
 
     pub focus: FocusPane,
+
+    /// Text-capture state for the search/filter and save-playlist prompts.
+    pub input_mode: InputMode,
+    /// Filename being typed in `SavePlaylist` mode.
+    pub input_buffer: String,
+    /// Active search filter (empty = no filter). Applies to `filter_pane`.
+    pub filter_query: String,
+    /// Which pane the current `filter_query` narrows.
+    pub filter_pane: FocusPane,
 
     pub current_meta: TrackMeta,
     pub current_duration: Option<Duration>,
@@ -211,11 +230,19 @@ impl App {
             browser_selected: 0,
             browser_state: ListState::default(),
             focus: FocusPane::Playlist,
+            input_mode: InputMode::Normal,
+            input_buffer: String::new(),
+            filter_query: String::new(),
+            filter_pane: FocusPane::Playlist,
             current_meta: TrackMeta::default(),
             current_duration: None,
             status: String::from("Ready"),
-            repeat: RepeatMode::Off,
-            shuffle: false,
+            repeat: match cfg.repeat.as_str() {
+                "all" => RepeatMode::All,
+                "one" => RepeatMode::One,
+                _ => RepeatMode::Off,
+            },
+            shuffle: cfg.shuffle,
             av_offset_secs: initial_av_offset,
             audio_output_latency_secs,
             video_render_ewma_secs: 0.0,
@@ -269,27 +296,60 @@ impl App {
         };
     }
 
-    pub fn move_selection(&mut self, delta: i32) {
-        match self.focus {
+    /// Indices into a pane's full list that pass the active filter. When no
+    /// filter applies to `pane`, this is simply every index in order. The
+    /// `selected`/`browser_selected` cursors always index the *full* lists; this
+    /// is the set navigation is constrained to and the panels render.
+    pub fn visible_indices(&self, pane: FocusPane) -> Vec<usize> {
+        let q = if pane == self.filter_pane {
+            self.filter_query.as_str()
+        } else {
+            ""
+        };
+        match pane {
             FocusPane::Playlist => {
-                if self.tracks.is_empty() {
-                    return;
-                }
-                let len = self.tracks.len() as i32;
-                let new = (self.selected as i32 + delta).rem_euclid(len);
-                self.selected = new as usize;
-                self.playlist_state.select(Some(self.selected));
+                filtered_indices(self.tracks.iter().map(|t| t.display.as_str()), q)
             }
             FocusPane::Browser => {
-                if self.browser_entries.is_empty() {
-                    return;
-                }
-                let len = self.browser_entries.len() as i32;
-                let new = (self.browser_selected as i32 + delta).rem_euclid(len);
-                self.browser_selected = new as usize;
-                self.browser_state.select(Some(self.browser_selected));
+                let names: Vec<String> =
+                    self.browser_entries.iter().map(|p| short_name(p)).collect();
+                filtered_indices(names.iter().map(|s| s.as_str()), q)
             }
         }
+    }
+
+    fn selection(&self, pane: FocusPane) -> usize {
+        match pane {
+            FocusPane::Playlist => self.selected,
+            FocusPane::Browser => self.browser_selected,
+        }
+    }
+
+    fn set_selection(&mut self, pane: FocusPane, idx: usize) {
+        match pane {
+            FocusPane::Playlist => {
+                self.selected = idx;
+                self.playlist_state.select(Some(idx));
+            }
+            FocusPane::Browser => {
+                self.browser_selected = idx;
+                self.browser_state.select(Some(idx));
+            }
+        }
+    }
+
+    /// Move the cursor by `delta` over the focused pane's *visible* entries,
+    /// wrapping around and skipping rows hidden by the filter.
+    pub fn move_selection(&mut self, delta: i32) {
+        let pane = self.focus;
+        let vis = self.visible_indices(pane);
+        if vis.is_empty() {
+            return;
+        }
+        let cur = self.selection(pane);
+        let pos = vis.iter().position(|&i| i == cur).unwrap_or(0);
+        let new_pos = (pos as i32 + delta).rem_euclid(vis.len() as i32) as usize;
+        self.set_selection(pane, vis[new_pos]);
     }
 
     pub fn page(&mut self, dir: i32) {
@@ -297,32 +357,28 @@ impl App {
     }
 
     pub fn select_first(&mut self) {
-        match self.focus {
-            FocusPane::Playlist if !self.tracks.is_empty() => {
-                self.selected = 0;
-                self.playlist_state.select(Some(0));
-            }
-            FocusPane::Browser if !self.browser_entries.is_empty() => {
-                self.browser_selected = 0;
-                self.browser_state.select(Some(0));
-            }
-            _ => {}
+        let pane = self.focus;
+        if let Some(&first) = self.visible_indices(pane).first() {
+            self.set_selection(pane, first);
         }
     }
 
     pub fn select_last(&mut self) {
-        match self.focus {
-            FocusPane::Playlist if !self.tracks.is_empty() => {
-                let i = self.tracks.len() - 1;
-                self.selected = i;
-                self.playlist_state.select(Some(i));
-            }
-            FocusPane::Browser if !self.browser_entries.is_empty() => {
-                let i = self.browser_entries.len() - 1;
-                self.browser_selected = i;
-                self.browser_state.select(Some(i));
-            }
-            _ => {}
+        let pane = self.focus;
+        if let Some(&last) = self.visible_indices(pane).last() {
+            self.set_selection(pane, last);
+        }
+    }
+
+    /// Keep the cursor on a visible row after the filter changes.
+    fn snap_selection_to_visible(&mut self) {
+        let pane = self.filter_pane;
+        let vis = self.visible_indices(pane);
+        if vis.is_empty() {
+            return;
+        }
+        if !vis.contains(&self.selection(pane)) {
+            self.set_selection(pane, vis[0]);
         }
     }
 
@@ -614,6 +670,192 @@ impl App {
         self.art.set_artwork(None, None);
         self.video.close();
         self.status = String::from("Playlist cleared");
+    }
+
+    // --- Search filter / text input ---------------------------------------
+
+    /// Begin filtering the focused pane (the `/` key).
+    pub fn start_filter(&mut self) {
+        self.filter_pane = self.focus;
+        self.filter_query.clear();
+        self.input_mode = InputMode::Filter;
+    }
+
+    /// Begin the "save playlist as" prompt (the `w` key).
+    pub fn start_save_playlist(&mut self) {
+        if self.tracks.is_empty() {
+            self.status = String::from("Playlist is empty — nothing to save");
+            return;
+        }
+        self.input_buffer = String::from("playlist");
+        self.input_mode = InputMode::SavePlaylist;
+    }
+
+    /// Append a typed character to the active text buffer.
+    pub fn input_push(&mut self, c: char) {
+        if c.is_control() {
+            return;
+        }
+        match self.input_mode {
+            InputMode::Filter => {
+                self.filter_query.push(c);
+                self.snap_selection_to_visible();
+            }
+            InputMode::SavePlaylist => self.input_buffer.push(c),
+            InputMode::Normal => {}
+        }
+    }
+
+    /// Delete the last character of the active text buffer (Backspace).
+    pub fn input_backspace(&mut self) {
+        match self.input_mode {
+            InputMode::Filter => {
+                self.filter_query.pop();
+                self.snap_selection_to_visible();
+            }
+            InputMode::SavePlaylist => {
+                self.input_buffer.pop();
+            }
+            InputMode::Normal => {}
+        }
+    }
+
+    /// Cancel text input (Esc). For a filter this also clears the query.
+    pub fn cancel_input(&mut self) {
+        if self.input_mode == InputMode::Filter {
+            self.filter_query.clear();
+        }
+        self.input_buffer.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    /// Commit text input (Enter). A filter stays applied but leaves typing mode;
+    /// a save prompt writes the playlist.
+    pub fn confirm_input(&mut self) {
+        match self.input_mode {
+            InputMode::Filter => self.input_mode = InputMode::Normal,
+            InputMode::SavePlaylist => {
+                let name = self.input_buffer.clone();
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.export_playlist(&name);
+            }
+            InputMode::Normal => {}
+        }
+    }
+
+    /// Write the current playlist to `<browser_dir>/<name>.m3u`, then refresh the
+    /// browser so the new file shows up as visible confirmation.
+    fn export_playlist(&mut self, name: &str) {
+        let name = name.trim();
+        let name = if name.is_empty() { "playlist" } else { name };
+        let file = self.browser_dir.join(format!("{name}.m3u"));
+        match self.library.save_playlist(&file, &self.tracks) {
+            Ok(()) => {
+                self.status = format!("Saved playlist: {}", file.display());
+                self.refresh_browser();
+            }
+            Err(e) => self.status = format!("Save failed: {e}"),
+        }
+    }
+
+    // --- Playlist editing --------------------------------------------------
+
+    /// Remove the highlighted playlist track. If it was playing, playback stops.
+    pub fn remove_selected_track(&mut self) {
+        if self.focus != FocusPane::Playlist || self.tracks.is_empty() {
+            return;
+        }
+        let idx = self.selected.min(self.tracks.len() - 1);
+        match self.playing_index {
+            Some(p) if p == idx => {
+                self.audio.stop();
+                self.video.close();
+                self.playing_index = None;
+                self.playing_track = None;
+                self.current_meta = TrackMeta::default();
+                self.current_duration = None;
+                self.art.set_artwork(None, None);
+            }
+            Some(p) if p > idx => self.playing_index = Some(p - 1),
+            _ => {}
+        }
+        self.tracks.remove(idx);
+        if self.selected >= self.tracks.len() {
+            self.selected = self.tracks.len().saturating_sub(1);
+        }
+        self.refresh_playlist_state();
+        self.status = String::from("Removed track");
+    }
+
+    /// Move the highlighted playlist track up (`delta = -1`) or down (`+1`),
+    /// keeping the cursor and the playing marker on it. Disabled while a playlist
+    /// filter is active (neighbours in the full list may be hidden).
+    pub fn move_selected_track(&mut self, delta: i32) {
+        if self.focus != FocusPane::Playlist {
+            return;
+        }
+        if self.filter_pane == FocusPane::Playlist && !self.filter_query.trim().is_empty() {
+            return;
+        }
+        let n = self.tracks.len();
+        if n < 2 {
+            return;
+        }
+        let from = self.selected.min(n - 1);
+        let to = from as i32 + delta;
+        if to < 0 || to as usize >= n {
+            return;
+        }
+        let to = to as usize;
+        self.tracks.swap(from, to);
+        self.playing_index = self.playing_index.map(|p| {
+            if p == from {
+                to
+            } else if p == to {
+                from
+            } else {
+                p
+            }
+        });
+        self.selected = to;
+        self.playlist_state.select(Some(to));
+    }
+
+    // --- Session persistence ----------------------------------------------
+
+    /// Snapshot the full persistable state (settings + resumable session).
+    fn current_config(&self) -> Config {
+        let playlist = self
+            .tracks
+            .iter()
+            .filter_map(|t| match &t.source {
+                TrackRef::Path(p) => Some(p.to_string_lossy().to_string()),
+                TrackRef::Url(..) => None,
+            })
+            .collect();
+        Config {
+            theme: self.theme.name.to_string(),
+            volume: self.audio.volume(),
+            visualizer: self.visualizer.mode.name().to_string(),
+            last_dir: Some(self.browser_dir.to_string_lossy().to_string()),
+            repeat: self.repeat.label().to_ascii_lowercase(),
+            shuffle: self.shuffle,
+            playlist,
+            playing_index: self.playing_index,
+            position_secs: self.audio.position().as_secs_f64(),
+        }
+    }
+
+    /// Persist everything (called on quit and on settings changes).
+    pub fn save_session(&self) {
+        self.config.save(&self.current_config());
+    }
+
+    /// Seek the current track to an absolute position (used to resume a session).
+    pub fn seek_to_secs(&mut self, secs: f64) {
+        let cur = self.audio.position().as_secs_f64();
+        self.seek_seconds(secs - cur);
     }
 
     pub fn cycle_repeat(&mut self) {
@@ -1117,12 +1359,7 @@ impl App {
 
     /// Persist the user-tunable bits (theme, volume, visualizer).
     pub fn save_config(&self) {
-        let cfg = Config {
-            theme: self.theme.name.to_string(),
-            volume: self.audio.volume(),
-            visualizer: self.visualizer.mode.name().to_string(),
-        };
-        self.config.save(&cfg);
+        self.config.save(&self.current_config());
     }
 
     pub fn position(&self) -> Duration {
@@ -1153,6 +1390,17 @@ impl App {
                 CoreKey::Home => self.help_scroll = 0,
                 // Clamped to the content height when the overlay is rendered.
                 CoreKey::End => self.help_scroll = u16::MAX,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.input_mode != InputMode::Normal {
+            match code {
+                CoreKey::Esc => self.cancel_input(),
+                CoreKey::Enter => self.confirm_input(),
+                CoreKey::Backspace => self.input_backspace(),
+                CoreKey::Char(c) => self.input_push(c),
                 _ => {}
             }
             return Ok(());
@@ -1200,7 +1448,12 @@ impl App {
                 self.show_help = true;
                 self.help_scroll = 0;
             }
+            CoreKey::Char('/') => self.start_filter(),
+            CoreKey::Char('w') => self.start_save_playlist(),
+            CoreKey::Char('d') | CoreKey::Delete => self.remove_selected_track(),
             CoreKey::Tab => self.focus_next(),
+            CoreKey::Up if ctrl => self.move_selected_track(-1),
+            CoreKey::Down if ctrl => self.move_selected_track(1),
             CoreKey::Up => self.move_selection(-1),
             CoreKey::Down => self.move_selection(1),
             CoreKey::PageUp => self.page(-1),
@@ -1235,4 +1488,36 @@ fn short_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| p.display().to_string())
+}
+
+/// Indices of `items` whose text contains `query`, case-insensitively. A blank
+/// query matches everything (all indices, in order) so an inactive filter is a
+/// no-op.
+fn filtered_indices<'a>(items: impl Iterator<Item = &'a str>, query: &str) -> Vec<usize> {
+    let q = query.trim().to_ascii_lowercase();
+    items
+        .enumerate()
+        .filter(|(_, s)| q.is_empty() || s.to_ascii_lowercase().contains(&q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_empty_query_matches_all() {
+        let items = ["Alpha", "Beta", "Gamma"];
+        assert_eq!(filtered_indices(items.iter().copied(), ""), vec![0, 1, 2]);
+        assert_eq!(filtered_indices(items.iter().copied(), "   "), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_substring() {
+        let items = ["The Beatles - Help", "Beethoven", "beat it"];
+        assert_eq!(filtered_indices(items.iter().copied(), "beat"), vec![0, 2]);
+        assert_eq!(filtered_indices(items.iter().copied(), "BEET"), vec![1]);
+        assert!(filtered_indices(items.iter().copied(), "zzz").is_empty());
+    }
 }
