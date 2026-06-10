@@ -221,6 +221,62 @@ Or install directly from a checkout with cargo:
 cargo install --path crates/sparkplayer-native
 ```
 
+### Building from source on Windows
+
+Unlike Linux, Windows has no system package manager that ships FFmpeg/SDL2
+development libraries, so `ffmpeg-sys-next` can't find them on its own. If you
+just `cargo build` you'll hit:
+
+```
+Could not find ffmpeg with vcpkg: Could not find Vcpkg root ...
+The pkg-config command could not be found.
+```
+
+You don't need vcpkg or pkg-config — you just need to point the build at
+prebuilt libraries with a few environment variables (this is exactly what CI
+does in `.github/workflows/release.yml`). One-time setup:
+
+1. **FFmpeg shared dev build** — download
+   [`ffmpeg-8.1.1-full_build-shared.7z`](https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.1-full_build-shared.7z)
+   from gyan.dev (LGPL) and extract it somewhere, e.g.
+   `C:\dev\ffmpeg`. The extracted folder must contain `include\`, `lib\` and
+   `bin\`. Pin this exact version — the bundled DLL names are
+   version-specific.
+2. **LLVM/Clang** — `ffmpeg-sys-next` uses `bindgen`, which needs `libclang`.
+   Install LLVM (`winget install LLVM.LLVM`, or grab it from
+   <https://releases.llvm.org/>); it lands in `C:\Program Files\LLVM`.
+3. **SDL2 VC dev libraries** — download
+   [`SDL2-devel-2.32.4-VC.zip`](https://github.com/libsdl-org/SDL/releases/download/release-2.32.4/SDL2-devel-2.32.4-VC.zip)
+   and extract it, e.g. `C:\dev\SDL2`. The linker only needs `SDL2.lib` from
+   `lib\x64`.
+
+Then set the environment variables and build (PowerShell). Adjust the paths to
+where you extracted each archive:
+
+```powershell
+$env:FFMPEG_DIR   = "C:\dev\ffmpeg\ffmpeg-8.1.1-full_build-shared"
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+$env:LIB          = "C:\dev\SDL2\SDL2-2.32.4\lib\x64;$env:LIB"
+
+cargo build --release
+```
+
+`ffmpeg-sys-next` reads `FFMPEG_DIR\include` and `FFMPEG_DIR\lib` directly, so
+no pkg-config/vcpkg is involved.
+
+To **run** the result, the FFmpeg DLLs (`avcodec-*.dll`, `avformat-*.dll`,
+`avutil-*.dll`, `swresample-*.dll`, `swscale-*.dll` from `FFMPEG_DIR\bin`) and
+`SDL2.dll` (from the SDL2 `lib\x64` folder) must sit next to
+`sparkplayer.exe` or be on your `PATH` — otherwise the program exits
+immediately at startup. (The released `.zip` and `.msi` bundle these for you;
+this only applies to your own source builds.)
+
+> Using an IDE / rust-analyzer? The variables above are per-shell. So the
+> editor's background `cargo check` sees them, set them as persistent user
+> environment variables (`setx FFMPEG_DIR "..."`, etc., or via *System
+> Properties → Environment Variables*) and **restart the IDE**, or add them to
+> rust-analyzer's `cargo.extraEnv` setting.
+
 ## Browser build (WASM)
 
 SparkPlayer also runs in the browser, rendered with
