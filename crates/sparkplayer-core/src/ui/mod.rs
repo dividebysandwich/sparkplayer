@@ -7,7 +7,7 @@
 //! `<video>`/`<img>` elements over the canvas.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::app::{App, FullscreenMode};
 
@@ -42,9 +42,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         match app.fullscreen {
             FullscreenMode::AlbumArt => draw_fullscreen_art(frame, area, app),
             FullscreenMode::AlbumArtVis => {
-                draw_fullscreen_art(frame, area, app);
-                // Overlay the active visualizer in the bottom-right quarter.
-                draw_visualizer(frame, bottom_right_quarter(area), app);
+                // Split the screen in half: art and visualizer never overlap
+                // (graphics protocols paint over their whole cell rect, so an
+                // overlapping visualizer would render underneath the art).
+                // Landscape → art left / visualizer right; portrait → art top /
+                // visualizer bottom. Cells are ~twice as tall as wide, so the
+                // screen is landscape when it's at least twice as wide as tall.
+                let landscape = area.width >= area.height.saturating_mul(2);
+                let halves = Layout::default()
+                    .direction(if landscape {
+                        Direction::Horizontal
+                    } else {
+                        Direction::Vertical
+                    })
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(area);
+                draw_fullscreen_art(frame, halves[0], app);
+                draw_visualizer(frame, halves[1], app);
             }
             // Visualizer (and Off, defensively): the video takes over when one
             // is loaded, otherwise the active visualizer fills the screen.
@@ -125,15 +139,3 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// The bottom-right quarter of `area`, used to overlay the visualizer on the
-/// fullscreen album art.
-fn bottom_right_quarter(area: Rect) -> Rect {
-    let half_w = area.width / 2;
-    let half_h = area.height / 2;
-    Rect {
-        x: area.x + half_w,
-        y: area.y + half_h,
-        width: area.width - half_w,
-        height: area.height - half_h,
-    }
-}
