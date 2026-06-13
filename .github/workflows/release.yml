@@ -243,6 +243,84 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # macOS aarch64 (Apple Silicon): native build, self-contained .zip with the
+  # FFmpeg/SDL2 dylibs bundled next to the binary.
+  # ---------------------------------------------------------------------------
+  macos-aarch64:
+    name: macOS aarch64 (Apple Silicon)
+    runs-on: macos-14
+    env:
+      TARGET: aarch64-apple-darwin
+      SUFFIX: macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Install FFmpeg + SDL2 + bundling tools
+        run: |
+          # Homebrew ships FFmpeg (with its .pc files) and SDL2; pkg-config and
+          # dylibbundler drive the build and the self-contained packaging.
+          brew install ffmpeg sdl2 pkg-config dylibbundler
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Build release binary
+        env:
+          # Homebrew on Apple Silicon installs under /opt/homebrew. pkg-config
+          # finds the FFmpeg .pc files there for ffmpeg-sys-next, and the linker
+          # needs the same prefix for SDL2 (sdl2-sys emits a bare `-lSDL2`).
+          PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig
+          LIBRARY_PATH: /opt/homebrew/lib
+        run: cargo build --release --locked --target ${{ env.TARGET }}
+
+      - name: Bundle FFmpeg + SDL2 dylibs next to the binary
+        run: |
+          # The Homebrew dylibs aren't installed on end-user machines, so copy
+          # them (and their non-system transitive deps) into release/libs and
+          # rewrite the install names to @executable_path/libs — making the .zip
+          # runnable without Homebrew, the same way the Windows build ships DLLs.
+          BIN="target/${TARGET}/release/sparkplayer"
+          dylibbundler --overwrite-dir --bundle-deps \
+            --fix-file "$BIN" \
+            --dest-dir "target/${TARGET}/release/libs" \
+            --install-path "@executable_path/libs/"
+
+      - name: Re-sign binary and bundled dylibs (ad-hoc)
+        run: |
+          # install_name_tool edits (done by dylibbundler) invalidate the code
+          # signature, and macOS refuses to run unsigned arm64 mach-o, so ad-hoc
+          # re-sign the binary and every bundled library.
+          BIN="target/${TARGET}/release/sparkplayer"
+          codesign --force --sign - "$BIN"
+          find "target/${TARGET}/release/libs" -name '*.dylib' \
+            -exec codesign --force --sign - {} \;
+
+      - name: Stage zip archive
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          STAGE="sparkplayer-${VERSION}-${SUFFIX}"
+          mkdir -p "${STAGE}"
+          cp "target/${TARGET}/release/sparkplayer" "${STAGE}/"
+          cp -R "target/${TARGET}/release/libs" "${STAGE}/"
+          cp README.md "${STAGE}/" || true
+          zip -9r "${STAGE}.zip" "${STAGE}"
+          echo "ZIP=${STAGE}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SUFFIX }}
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Web (WASM): the browser bundle built with Trunk, packaged as a .tar.gz
   # ---------------------------------------------------------------------------
   web:
@@ -299,6 +377,7 @@ jobs:
       - linux-x86_64
       - linux-cross
       - windows-x86_64
+      - macos-aarch64
       - web
     runs-on: ubuntu-latest
     steps:

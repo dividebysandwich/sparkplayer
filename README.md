@@ -277,6 +277,26 @@ this only applies to your own source builds.)
 > Properties → Environment Variables*) and **restart the IDE**, or add them to
 > rust-analyzer's `cargo.extraEnv` setting.
 
+### Building from source on macOS
+
+macOS has no FFmpeg/SDL2 in the base system, but [Homebrew](https://brew.sh/)
+provides both. On Apple Silicon they install under `/opt/homebrew`:
+
+```sh
+brew install ffmpeg sdl2 pkg-config
+cargo build --release
+```
+
+`ffmpeg-sys-next` locates FFmpeg through pkg-config and `sdl2-sys` links a bare
+`-lSDL2`, so both resolve from the Homebrew prefix automatically (Cargo's build
+already searches `/opt/homebrew/lib`; if a fresh shell can't find them, set
+`PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig` and `LIBRARY_PATH=/opt/homebrew/lib`).
+
+A source build links against the Homebrew dylibs, so it runs only while those
+remain installed. The released `macos-aarch64` `.zip` bundles the FFmpeg/SDL2
+dylibs next to the binary (in `libs/`, re-signed ad-hoc), so it runs without
+Homebrew.
+
 ## Browser build (WASM)
 
 SparkPlayer also runs in the browser, rendered with
