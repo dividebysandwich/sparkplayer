@@ -295,7 +295,14 @@ impl AlbumArtRenderer for NativeAlbumArt {
         if let Some(proto) = self.protocol.as_mut() {
             let (iw, ih) = dims.unwrap_or((1, 1));
             let img_area = fit_image_rect(area, iw, ih, font);
-            frame.render_stateful_widget(StatefulImage::default(), img_area, proto);
+            // `Resize::Scale` (not the default `Resize::Fit`) so small artwork is
+            // upscaled to fill the area — Fit only ever scales down, leaving the
+            // image stuck at its native size when the window grows.
+            frame.render_stateful_widget(
+                StatefulImage::default().resize(Resize::Scale(None)),
+                img_area,
+                proto,
+            );
         }
     }
 }

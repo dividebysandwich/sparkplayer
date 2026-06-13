@@ -7,9 +7,9 @@
 //! `<video>`/`<img>` elements over the canvas.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-use crate::app::App;
+use crate::app::{App, FullscreenMode};
 
 mod cassette;
 mod overlays;
@@ -19,7 +19,10 @@ mod video_panel;
 mod visualizers;
 
 use overlays::{draw_escape_menu, draw_help};
-use panels::{draw_album_art, draw_browser, draw_footer, draw_now_playing, draw_playlist};
+use panels::{
+    draw_album_art, draw_browser, draw_footer, draw_fullscreen_art, draw_now_playing,
+    draw_playlist,
+};
 use video_panel::draw_video;
 use visualizers::draw_visualizer;
 
@@ -34,12 +37,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let has_video = app.video.has_image();
 
-    if app.fullscreen_vis {
-        // Give the entire screen to the video/visualizer — no footer.
-        if has_video {
-            draw_video(frame, area, app);
-        } else {
-            draw_visualizer(frame, area, app);
+    if app.fullscreen.is_on() {
+        // Give the entire screen to the content — no footer.
+        match app.fullscreen {
+            FullscreenMode::AlbumArt => draw_fullscreen_art(frame, area, app),
+            FullscreenMode::AlbumArtVis => {
+                draw_fullscreen_art(frame, area, app);
+                // Overlay the active visualizer in the bottom-right quarter.
+                draw_visualizer(frame, bottom_right_quarter(area), app);
+            }
+            // Visualizer (and Off, defensively): the video takes over when one
+            // is loaded, otherwise the active visualizer fills the screen.
+            FullscreenMode::Visualizer | FullscreenMode::Off => {
+                if has_video {
+                    draw_video(frame, area, app);
+                } else {
+                    draw_visualizer(frame, area, app);
+                }
+            }
         }
         if app.show_help {
             draw_help(frame, area, app);
@@ -107,5 +122,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.show_escape_menu {
         draw_escape_menu(frame, area, app);
+    }
+}
+
+/// The bottom-right quarter of `area`, used to overlay the visualizer on the
+/// fullscreen album art.
+fn bottom_right_quarter(area: Rect) -> Rect {
+    let half_w = area.width / 2;
+    let half_h = area.height / 2;
+    Rect {
+        x: area.x + half_w,
+        y: area.y + half_h,
+        width: area.width - half_w,
+        height: area.height - half_h,
     }
 }

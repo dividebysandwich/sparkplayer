@@ -539,6 +539,37 @@ pub(super) fn draw_album_art(frame: &mut Frame, area: Rect, app: &mut App) {
     app.art.render(frame, inner);
 }
 
+/// Fill the whole `area` with the track artwork for the fullscreen album-art
+/// display modes. The image is drawn through the backend renderer (graphically
+/// when the terminal supports it, ASCII halfblocks otherwise), centered and
+/// aspect-fit within `area`. When the track has no artwork a centered notice is
+/// shown instead.
+pub(super) fn draw_fullscreen_art(frame: &mut Frame, area: Rect, app: &mut App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // Paint the backdrop so any letterbox margins around the image are clean.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(panel_bg())),
+        area,
+    );
+
+    if !app.art.has_art() {
+        let notice = Paragraph::new("No album art")
+            .style(Style::default().fg(dim()))
+            .alignment(Alignment::Center);
+        let y = area.y + area.height / 2;
+        let line = Rect::new(area.x, y, area.width, 1);
+        frame.render_widget(notice, line);
+        return;
+    }
+
+    // Record the rect for the web `<img>` overlay, then let the backend paint
+    // the art (native: ratatui-image; web: no-op, the overlay floats above).
+    app.last_art_rect = Some(area);
+    app.art.render(frame, area);
+}
+
 pub(super) fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)

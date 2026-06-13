@@ -99,6 +99,41 @@ impl RepeatMode {
     }
 }
 
+/// The in-app fullscreen display modes. `f` cycles through these (the external
+/// video window is a separate step handled in [`App::cycle_display_mode`]).
+/// `AlbumArt` and `AlbumArtVis` are music-only — they show the track artwork
+/// (rendered graphically when the terminal supports it, ASCII otherwise).
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub enum FullscreenMode {
+    /// Not fullscreen — the normal multi-panel layout.
+    #[default]
+    Off,
+    /// The active visualizer (or the video, when one is loaded) fills the screen.
+    Visualizer,
+    /// The album/song art fills the screen.
+    AlbumArt,
+    /// The album/song art fills the screen with the active visualizer overlaid
+    /// in the bottom-right quarter.
+    AlbumArtVis,
+}
+
+impl FullscreenMode {
+    /// Whether any fullscreen mode is active (i.e. not [`FullscreenMode::Off`]).
+    pub fn is_on(self) -> bool {
+        !matches!(self, FullscreenMode::Off)
+    }
+
+    /// Short label for the escape-menu "Fullscreen" row.
+    pub fn label(self) -> &'static str {
+        match self {
+            FullscreenMode::Off => "Off",
+            FullscreenMode::Visualizer => "Visualizer",
+            FullscreenMode::AlbumArt => "Album Art",
+            FullscreenMode::AlbumArtVis => "Art + Visualizer",
+        }
+    }
+}
+
 /// Central application state. Platform behavior is reached only through the
 /// boxed backend trait objects; everything else (selection, playlist, A/V
 /// arithmetic, escape menu, subtitle bookkeeping) is platform-agnostic and
@@ -163,7 +198,7 @@ pub struct App {
     pub help_scroll: u16,
     pub show_escape_menu: bool,
     pub escape_menu_selected: usize,
-    pub fullscreen_vis: bool,
+    pub fullscreen: FullscreenMode,
 
     /// Whether the platform can open external URLs (web: yes via the browser;
     /// native: no). Gates the escape menu's "GitHub" entry.
@@ -259,7 +294,7 @@ impl App {
             help_scroll: 0,
             show_escape_menu: false,
             escape_menu_selected: 0,
-            fullscreen_vis: false,
+            fullscreen: FullscreenMode::Off,
             url_open_supported: false,
             pending_url_open: None,
             theme,
@@ -1066,33 +1101,59 @@ impl App {
     }
 
     pub fn toggle_fullscreen(&mut self) {
-        self.fullscreen_vis = !self.fullscreen_vis;
+        self.fullscreen = if self.fullscreen.is_on() {
+            FullscreenMode::Off
+        } else {
+            FullscreenMode::Visualizer
+        };
     }
 
-    /// Cycle the display mode: Normal → in-app Fullscreen → external Video
-    /// Window → Normal. The external-window step is skipped when the backend
-    /// doesn't support one (web) or no video is loaded (music), so in those
-    /// cases it collapses to Normal↔Fullscreen.
+    /// Cycle the display mode with `f`.
+    ///
+    /// With a video loaded: Normal → in-app Fullscreen → external Video Window
+    /// → Normal (the window step is skipped when the backend doesn't support
+    /// one, e.g. web).
+    ///
+    /// For music: Normal → fullscreen Visualizer → fullscreen Album Art →
+    /// fullscreen Album Art + Visualizer → Normal. The two album-art steps are
+    /// skipped when the track has no artwork, so it collapses to Normal ↔
+    /// fullscreen Visualizer.
     pub fn cycle_display_mode(&mut self) {
-        if self.video.external_window_enabled() {
-            self.video.set_external_window(false);
-            self.fullscreen_vis = false;
-            self.status = String::from("Display: normal");
-        } else if self.fullscreen_vis {
-            self.fullscreen_vis = false;
-            // The external video window only makes sense when a video is
-            // actually playing — for music, collapse straight to normal so `f`
-            // just toggles normal ↔ fullscreen.
-            if self.video.supports_external_window() && self.video.is_loaded() {
-                self.video.set_external_window(true);
-                self.status = String::from("Display: video window");
-            } else {
+        if self.video.is_loaded() {
+            if self.video.external_window_enabled() {
+                self.video.set_external_window(false);
+                self.fullscreen = FullscreenMode::Off;
                 self.status = String::from("Display: normal");
+            } else if self.fullscreen.is_on() {
+                self.fullscreen = FullscreenMode::Off;
+                if self.video.supports_external_window() {
+                    self.video.set_external_window(true);
+                    self.status = String::from("Display: video window");
+                } else {
+                    self.status = String::from("Display: normal");
+                }
+            } else {
+                self.fullscreen = FullscreenMode::Visualizer;
+                self.status = String::from("Display: fullscreen");
             }
-        } else {
-            self.fullscreen_vis = true;
-            self.status = String::from("Display: fullscreen");
+            return;
         }
+
+        // Music path.
+        let has_art = self.art.has_art();
+        self.fullscreen = match self.fullscreen {
+            FullscreenMode::Off => FullscreenMode::Visualizer,
+            FullscreenMode::Visualizer if has_art => FullscreenMode::AlbumArt,
+            FullscreenMode::Visualizer => FullscreenMode::Off,
+            FullscreenMode::AlbumArt => FullscreenMode::AlbumArtVis,
+            FullscreenMode::AlbumArtVis => FullscreenMode::Off,
+        };
+        self.status = String::from(match self.fullscreen {
+            FullscreenMode::Off => "Display: normal",
+            FullscreenMode::Visualizer => "Display: fullscreen visualizer",
+            FullscreenMode::AlbumArt => "Display: fullscreen album art",
+            FullscreenMode::AlbumArtVis => "Display: fullscreen album art + visualizer",
+        });
     }
 
     /// Flip the dedicated-window option from the escape menu.
@@ -1194,7 +1255,7 @@ impl App {
                 kind: EscapeMenuKind::Fullscreen,
                 enabled: true,
                 label: "Fullscreen",
-                value: if self.fullscreen_vis { "On" } else { "Off" }.to_string(),
+                value: self.fullscreen.label().to_string(),
             },
             EscapeMenuItem {
                 kind: EscapeMenuKind::VideoWindow,

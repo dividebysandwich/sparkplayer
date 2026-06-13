@@ -2899,7 +2899,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "sparkplayer-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "ratatui",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "sparkplayer-native"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "sparkplayer-web"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
