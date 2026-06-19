@@ -24,6 +24,7 @@ pub(super) fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
             let t = &app.tracks[i];
             let playing = Some(i) == app.playing_index;
             let prefix = if playing { "▶ " } else { "  " };
+            let fav = if app.is_favorite(&t.source) { "★ " } else { "" };
             let style = if playing {
                 Style::default()
                     .fg(yellow())
@@ -33,6 +34,7 @@ pub(super) fn draw_playlist(frame: &mut Frame, area: Rect, app: &mut App) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(prefix, Style::default().fg(cyan())),
+                Span::styled(fav, Style::default().fg(yellow())),
                 Span::styled(t.display.clone(), style),
             ]))
         })
@@ -357,6 +359,16 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
     ];
+    if let Some(src) = &app.playing_track {
+        let star = if app.is_favorite(src) { "★ " } else { "" };
+        badges.push(Span::styled(
+            format!(" {}Plays: {} ", star, app.play_count(src)),
+            Style::default()
+                .fg(Color::Black)
+                .bg(yellow())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if app.video.is_loaded() {
         let mode = if app.auto_av_offset { "auto" } else { "manual" };
         badges.push(Span::styled(
@@ -591,12 +603,14 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
 
     // Priority-ordered: most important first. We drop entries from the end
     // when the bar wouldn't fit the available width.
-    let entries: [(&str, &str); 15] = [
+    let entries: [(&str, &str); 17] = [
         ("?", "Help"),
         ("←→", "Seek 10s"),
         ("Tab", "Focus"),
         ("Space", "Play/Pause"),
         ("+/-", "Volume"),
+        ("g", "Search"),
+        ("F", "Favorite"),
         ("v", "Visualizer"),
         ("t", "Theme"),
         ("f", "Fullscreen"),

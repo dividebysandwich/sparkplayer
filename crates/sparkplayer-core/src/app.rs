@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -73,6 +74,35 @@ pub struct EscapeMenuItem {
     pub enabled: bool,
     pub label: &'static str,
     pub value: String,
+}
+
+/// Which slice of the library the global search overlay browses. `Tab` cycles
+/// through these; the query then fuzzy-matches within the slice.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SearchScope {
+    All,
+    Favorites,
+    Recent,
+    MostPlayed,
+}
+
+impl SearchScope {
+    pub fn cycle(self) -> Self {
+        match self {
+            SearchScope::All => SearchScope::Favorites,
+            SearchScope::Favorites => SearchScope::Recent,
+            SearchScope::Recent => SearchScope::MostPlayed,
+            SearchScope::MostPlayed => SearchScope::All,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            SearchScope::All => "All",
+            SearchScope::Favorites => "Favorites",
+            SearchScope::Recent => "Recent",
+            SearchScope::MostPlayed => "Most Played",
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -174,6 +204,25 @@ pub struct App {
 
     pub repeat: RepeatMode,
     pub shuffle: bool,
+
+    /// Favorited track locators (paths). Toggled with `F`, persisted.
+    pub favorites: HashSet<String>,
+    /// Recently-played track locators, most-recent first (capped).
+    pub recent: Vec<String>,
+    /// Per-track play counts keyed by locator.
+    pub play_counts: HashMap<String, u32>,
+
+    /// Whole-library track index for the global search overlay. Empty until the
+    /// platform finishes its background scan (see `set_search_index`); always
+    /// empty on web (no filesystem).
+    pub search_index: Vec<Track>,
+    /// Whether the background index scan has reported in at least once.
+    pub search_index_ready: bool,
+    pub show_search: bool,
+    pub search_query: String,
+    /// Cursor position *within the current result list* (not the index).
+    pub search_selected: usize,
+    pub search_scope: SearchScope,
 
     // A/V sync (pure arithmetic, shared). On web `advance` returns None so the
     // offset stays at its baseline and the `<video>` element self-syncs.
@@ -278,6 +327,15 @@ impl App {
                 _ => RepeatMode::Off,
             },
             shuffle: cfg.shuffle,
+            favorites: cfg.favorites.iter().cloned().collect(),
+            recent: cfg.recent.clone(),
+            play_counts: cfg.play_counts.iter().cloned().collect(),
+            search_index: Vec::new(),
+            search_index_ready: false,
+            show_search: false,
+            search_query: String::new(),
+            search_selected: 0,
+            search_scope: SearchScope::All,
             av_offset_secs: initial_av_offset,
             audio_output_latency_secs,
             video_render_ewma_secs: 0.0,
@@ -496,6 +554,7 @@ impl App {
                 self.selected = idx;
                 self.playlist_state.select(Some(idx));
                 self.status = format!("Playing: {}", self.tracks[idx].display);
+                self.note_play(&source);
                 self.refresh_album_art();
                 if library::is_video(&source) {
                     self.video.open(&source);
@@ -879,6 +938,13 @@ impl App {
             playlist,
             playing_index: self.playing_index,
             position_secs: self.audio.position().as_secs_f64(),
+            favorites: self.favorites.iter().cloned().collect(),
+            recent: self.recent.clone(),
+            play_counts: self
+                .play_counts
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
         }
     }
 
@@ -1423,6 +1489,175 @@ impl App {
         self.config.save(&self.current_config());
     }
 
+    // --- Favorites / play counts / recently-played ------------------------
+
+    /// Record that `source` just started playing: bump its play count and move
+    /// it to the front of the recently-played list.
+    fn note_play(&mut self, source: &TrackRef) {
+        let key = source.locator();
+        *self.play_counts.entry(key.clone()).or_insert(0) += 1;
+        self.recent.retain(|p| p != &key);
+        self.recent.insert(0, key);
+        self.recent.truncate(crate::config::RECENT_CAP);
+    }
+
+    /// Whether `source` is favorited.
+    pub fn is_favorite(&self, source: &TrackRef) -> bool {
+        self.favorites.contains(&source.locator())
+    }
+
+    /// The track `F` should favorite: the focused selection (a playlist track or
+    /// a browsed audio file), falling back to whatever is playing.
+    fn favorite_target(&self) -> Option<String> {
+        let focused = match self.focus {
+            FocusPane::Playlist => self.tracks.get(self.selected).map(|t| t.source.locator()),
+            FocusPane::Browser => self
+                .browser_entries
+                .get(self.browser_selected)
+                .filter(|p| p.is_file() && library::is_audio_file(p))
+                .map(|p| p.to_string_lossy().to_string()),
+        };
+        focused.or_else(|| self.playing_track.as_ref().map(|s| s.locator()))
+    }
+
+    /// Toggle the favorite flag on the focused/playing track and persist.
+    pub fn toggle_favorite(&mut self) {
+        let Some(key) = self.favorite_target() else {
+            self.status = String::from("No track to favorite");
+            return;
+        };
+        if self.favorites.remove(&key) {
+            self.status = String::from("Removed from favorites");
+        } else {
+            self.favorites.insert(key);
+            self.status = String::from("★ Added to favorites");
+        }
+        self.save_config();
+    }
+
+    // --- Global library search overlay ------------------------------------
+
+    /// Replace the whole-library search index (called by the platform once its
+    /// background scan finishes). Keeps the cursor in range.
+    pub fn set_search_index(&mut self, tracks: Vec<Track>) {
+        self.search_index = tracks;
+        self.search_index_ready = true;
+        self.clamp_search_selection();
+    }
+
+    pub fn open_search(&mut self) {
+        self.show_search = true;
+        self.search_query.clear();
+        self.search_selected = 0;
+    }
+
+    pub fn close_search(&mut self) {
+        self.show_search = false;
+    }
+
+    pub fn search_input_push(&mut self, c: char) {
+        if c.is_control() {
+            return;
+        }
+        self.search_query.push(c);
+        self.search_selected = 0;
+    }
+
+    pub fn search_input_backspace(&mut self) {
+        self.search_query.pop();
+        self.search_selected = 0;
+    }
+
+    pub fn search_cycle_scope(&mut self) {
+        self.search_scope = self.search_scope.cycle();
+        self.search_selected = 0;
+    }
+
+    pub fn search_move(&mut self, delta: i32) {
+        let len = self.search_results().len();
+        if len == 0 {
+            self.search_selected = 0;
+            return;
+        }
+        let cur = self.search_selected.min(len - 1) as i32;
+        self.search_selected = (cur + delta).rem_euclid(len as i32) as usize;
+    }
+
+    fn clamp_search_selection(&mut self) {
+        let len = self.search_results().len();
+        if len == 0 {
+            self.search_selected = 0;
+        } else if self.search_selected >= len {
+            self.search_selected = len - 1;
+        }
+    }
+
+    /// Indices into `search_index` matching the current scope + query, ordered
+    /// for display (recency for Recent, descending count for Most Played).
+    pub fn search_results(&self) -> Vec<usize> {
+        let q = self.search_query.trim().to_ascii_lowercase();
+        let mut idxs: Vec<usize> = self
+            .search_index
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let loc = t.source.locator();
+                match self.search_scope {
+                    SearchScope::All => true,
+                    SearchScope::Favorites => self.favorites.contains(&loc),
+                    SearchScope::Recent => self.recent.contains(&loc),
+                    SearchScope::MostPlayed => {
+                        self.play_counts.get(&loc).copied().unwrap_or(0) > 0
+                    }
+                }
+            })
+            .filter(|(_, t)| q.is_empty() || fuzzy_match(&t.display, &q))
+            .map(|(i, _)| i)
+            .collect();
+        match self.search_scope {
+            SearchScope::Recent => idxs.sort_by_key(|&i| {
+                let loc = self.search_index[i].source.locator();
+                self.recent.iter().position(|p| *p == loc).unwrap_or(usize::MAX)
+            }),
+            SearchScope::MostPlayed => idxs.sort_by(|&a, &b| {
+                let ca = self
+                    .play_counts
+                    .get(&self.search_index[a].source.locator())
+                    .copied()
+                    .unwrap_or(0);
+                let cb = self
+                    .play_counts
+                    .get(&self.search_index[b].source.locator())
+                    .copied()
+                    .unwrap_or(0);
+                cb.cmp(&ca)
+            }),
+            _ => {}
+        }
+        idxs
+    }
+
+    /// Play count for a track, for display.
+    pub fn play_count(&self, source: &TrackRef) -> u32 {
+        self.play_counts.get(&source.locator()).copied().unwrap_or(0)
+    }
+
+    /// Append the highlighted search result to the playlist and play it.
+    pub fn activate_search(&mut self) -> Result<()> {
+        let results = self.search_results();
+        let Some(&idx) = results.get(self.search_selected) else {
+            return Ok(());
+        };
+        let track = self.search_index[idx].clone();
+        self.tracks.push(track);
+        let new_idx = self.tracks.len() - 1;
+        self.selected = new_idx;
+        self.focus = FocusPane::Playlist;
+        self.refresh_playlist_state();
+        self.close_search();
+        self.play_index(new_idx)
+    }
+
     pub fn position(&self) -> Duration {
         self.audio.position()
     }
@@ -1462,6 +1697,26 @@ impl App {
                 CoreKey::Enter => self.confirm_input(),
                 CoreKey::Backspace => self.input_backspace(),
                 CoreKey::Char(c) => self.input_push(c),
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.show_search {
+            if matches!(code, CoreKey::Char('c')) && ctrl {
+                self.should_quit = true;
+                return Ok(());
+            }
+            match code {
+                CoreKey::Esc => self.close_search(),
+                CoreKey::Up => self.search_move(-1),
+                CoreKey::Down => self.search_move(1),
+                CoreKey::PageUp => self.search_move(-10),
+                CoreKey::PageDown => self.search_move(10),
+                CoreKey::Tab => self.search_cycle_scope(),
+                CoreKey::Enter => self.activate_search()?,
+                CoreKey::Backspace => self.search_input_backspace(),
+                CoreKey::Char(c) => self.search_input_push(c),
                 _ => {}
             }
             return Ok(());
@@ -1510,6 +1765,8 @@ impl App {
                 self.help_scroll = 0;
             }
             CoreKey::Char('/') => self.start_filter(),
+            CoreKey::Char('g') => self.open_search(),
+            CoreKey::Char('F') => self.toggle_favorite(),
             CoreKey::Char('w') => self.start_save_playlist(),
             CoreKey::Char('d') | CoreKey::Delete => self.remove_selected_track(),
             CoreKey::Tab => self.focus_next(),
@@ -1563,9 +1820,39 @@ fn filtered_indices<'a>(items: impl Iterator<Item = &'a str>, query: &str) -> Ve
         .collect()
 }
 
+/// Case-insensitive *subsequence* match: every character of `needle_lower` (which
+/// the caller has already lowercased) appears in `haystack` in order, not
+/// necessarily contiguously. An empty needle matches everything. Powers the
+/// global search overlay's fuzzy "jump to track".
+pub fn fuzzy_match(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    let mut needle = needle_lower.chars();
+    let mut want = needle.next();
+    for h in haystack.chars().flat_map(|c| c.to_lowercase()) {
+        match want {
+            Some(n) if h == n => want = needle.next(),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    want.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fuzzy_matches_subsequence_case_insensitively() {
+        assert!(fuzzy_match("The Beatles - Help", "beat"));
+        assert!(fuzzy_match("The Beatles - Help", "thlp")); // gapped subsequence
+        assert!(fuzzy_match("Beethoven", "BTHVN".to_ascii_lowercase().as_str()));
+        assert!(fuzzy_match("anything", ""));
+        assert!(!fuzzy_match("short", "longer"));
+        assert!(!fuzzy_match("abc", "acb")); // order matters
+    }
 
     #[test]
     fn filter_empty_query_matches_all() {

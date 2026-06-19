@@ -7,9 +7,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
-use crate::app::{App, EscapeMenuKind};
+use crate::app::{App, EscapeMenuKind, SearchScope};
 
-use super::palette::{cyan, dim, pink, purple, text, yellow};
+use super::palette::{cyan, dim, green, pink, purple, text, yellow};
 
 pub(super) fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
     let w = area.width.min(70);
@@ -101,6 +101,9 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  Home / End     jump to first / last"),
         Line::from("  Tab            switch focus (playlist ↔ browser)"),
         Line::from("  /              filter the focused list (Esc clears)"),
+        Line::from("  g              search the whole library (fuzzy);"),
+        Line::from("                 Tab cycles All / Favorites / Recent /"),
+        Line::from("                 Most Played, Enter queues + plays"),
         Line::from(""),
         section("Managing the playlist"),
         Line::from("  Enter          browser: open folder / load playlist /"),
@@ -112,6 +115,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  Ctrl+↑ / ↓     move the highlighted track up / down"),
         Line::from("  w              save the playlist to an .m3u file"),
         Line::from("  Shift+C        clear the playlist (stops playback)"),
+        Line::from("  Shift+F        favorite / unfavorite the track (★)"),
         Line::from("  s              shuffle the remaining tracks"),
         Line::from("  r              cycle repeat (off / all / one)"),
         Line::from(""),
@@ -295,6 +299,148 @@ pub(super) fn draw_escape_menu(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(hint).alignment(Alignment::Center),
         layout[4],
     );
+}
+
+pub(super) fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
+    let w = area.width.min(80);
+    let h = area.height.min(26);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+    frame.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pink()).add_modifier(Modifier::BOLD))
+        .title(Line::from(Span::styled(
+            " 🔎 Search Library ",
+            Style::default().fg(yellow()).add_modifier(Modifier::BOLD),
+        )))
+        .title_bottom(Line::from(Span::styled(
+            " ↑↓ move • Tab scope • Enter play • Esc close ",
+            Style::default().fg(dim()),
+        )))
+        .padding(Padding::new(1, 1, 0, 0))
+        .style(Style::default().bg(Color::Rgb(15, 10, 30)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // scope tabs
+            Constraint::Length(1), // query line
+            Constraint::Length(1), // spacer
+            Constraint::Min(0),    // results
+        ])
+        .split(inner);
+
+    // Scope tabs.
+    let scopes = [
+        SearchScope::All,
+        SearchScope::Favorites,
+        SearchScope::Recent,
+        SearchScope::MostPlayed,
+    ];
+    let mut tab_spans: Vec<Span> = Vec::new();
+    for (i, s) in scopes.iter().enumerate() {
+        if i > 0 {
+            tab_spans.push(Span::styled("  ", Style::default().fg(dim())));
+        }
+        let active = *s == app.search_scope;
+        let style = if active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(cyan())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(dim())
+        };
+        tab_spans.push(Span::styled(format!(" {} ", s.label()), style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(tab_spans)), layout[0]);
+
+    // Query line.
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("› ", Style::default().fg(pink()).add_modifier(Modifier::BOLD)),
+            Span::styled(app.search_query.clone(), Style::default().fg(yellow())),
+            Span::styled("▏", Style::default().fg(cyan())),
+        ])),
+        layout[1],
+    );
+
+    // Results.
+    let results = app.search_results();
+    let body = layout[3];
+    let height = body.height as usize;
+    if !app.search_index_ready {
+        frame.render_widget(
+            Paragraph::new("Indexing your library…").style(Style::default().fg(dim())),
+            body,
+        );
+        return;
+    }
+    if results.is_empty() {
+        let msg = if app.search_index.is_empty() {
+            "Library index is empty"
+        } else {
+            "No matches"
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(dim())),
+            body,
+        );
+        return;
+    }
+
+    // Scroll so the selected row stays visible.
+    let sel = app.search_selected.min(results.len() - 1);
+    let start = if height == 0 || sel < height {
+        0
+    } else {
+        sel - height + 1
+    };
+    let count_col = 6usize;
+    let name_w = (body.width as usize).saturating_sub(count_col + 3);
+    let mut rows: Vec<Line> = Vec::with_capacity(height);
+    for (row, &idx) in results.iter().enumerate().skip(start).take(height) {
+        let track = &app.search_index[idx];
+        let selected = row == sel;
+        let fav = app.is_favorite(&track.source);
+        let count = app.play_count(&track.source);
+        let star = if fav { "★ " } else { "  " };
+        let name = truncate(&track.display, name_w);
+        let count_str = if count > 0 {
+            format!("×{count}")
+        } else {
+            String::new()
+        };
+        let prefix = if selected { "➤ " } else { "  " };
+        let name_style = if selected {
+            Style::default().fg(cyan()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(text())
+        };
+        rows.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(if selected { pink() } else { Color::Reset })),
+            Span::styled(star, Style::default().fg(yellow())),
+            Span::styled(pad_right(&name, name_w), name_style),
+            Span::styled(format!(" {count_str:>width$}", width = count_col), Style::default().fg(green())),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(rows), body);
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max || max == 0 {
+        return s.to_string();
+    }
+    let take = max.saturating_sub(1);
+    let mut out: String = s.chars().take(take).collect();
+    out.push('…');
+    out
 }
 
 fn pad_right(s: &str, width: usize) -> String {

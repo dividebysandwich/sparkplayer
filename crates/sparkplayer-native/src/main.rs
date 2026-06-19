@@ -2,12 +2,14 @@ mod audio;
 mod backends;
 mod external_window;
 mod library_native;
+mod media_controls;
 mod metadata_native;
 mod subtitles_native;
 mod video;
 
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -29,6 +31,7 @@ use crate::backends::{
     build_picker, GraphicsChoice, NativeAlbumArt, NativeConfigStore, NativeVideoBackend,
 };
 use crate::library_native::NativeLibrary;
+use crate::media_controls::{MediaCommand, MediaOs};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum GraphicsArg {
@@ -188,10 +191,47 @@ fn main() -> Result<()> {
         }
     }
 
-    let res = run_loop(&mut terminal, &mut app);
+    // Build the whole-library search index in the background so startup stays
+    // instant; the result is drained into the app once it lands.
+    let index_root = library_native::default_music_dir();
+    let (idx_tx, idx_rx) = mpsc::channel::<Vec<Track>>();
+    std::thread::spawn(move || {
+        let _ = idx_tx.send(library_native::scan_directory(&index_root));
+    });
+
+    // Best-effort OS media integration (MPRIS / Now Playing). Absent D-Bus etc.
+    // it just stays off.
+    let mut media = MediaOs::new().ok();
+
+    let res = run_loop(&mut terminal, &mut app, idx_rx, media.as_mut());
     restore_terminal(&mut terminal).ok();
     app.save_session();
     res
+}
+
+/// Translate an OS media-control request into an app action.
+fn apply_media(cmd: MediaCommand, app: &mut App) -> Result<()> {
+    match cmd {
+        MediaCommand::Toggle => app.audio.toggle_pause(),
+        MediaCommand::Play => {
+            if app.audio.is_paused() {
+                app.audio.toggle_pause();
+            }
+        }
+        MediaCommand::Pause => {
+            if !app.audio.is_paused() {
+                app.audio.toggle_pause();
+            }
+        }
+        MediaCommand::Next => app.next_track()?,
+        MediaCommand::Prev => app.prev_track()?,
+        MediaCommand::Stop => app.audio.stop(),
+        MediaCommand::SeekForward => app.seek_seconds(10.0),
+        MediaCommand::SeekBack => app.seek_seconds(-10.0),
+        MediaCommand::SetPosition(pos) => app.seek_to_secs(pos.as_secs_f64()),
+        MediaCommand::Quit => app.should_quit = true,
+    }
+    Ok(())
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -210,7 +250,12 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    index_rx: Receiver<Vec<Track>>,
+    mut media: Option<&mut MediaOs>,
+) -> Result<()> {
     let frame_dur = Duration::from_millis(33);
     let start = Instant::now();
     let mut last_tick = Instant::now();
@@ -218,6 +263,18 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
     loop {
         app.set_clock(start.elapsed().as_secs_f64());
         terminal.draw(|f| ui::draw(f, app))?;
+
+        // Adopt the library index once the background scan reports in.
+        if let Ok(tracks) = index_rx.try_recv() {
+            app.set_search_index(tracks);
+        }
+
+        // Apply any OS media-control requests (media keys, desktop widget).
+        if let Some(m) = media.as_deref_mut() {
+            for cmd in m.poll() {
+                apply_media(cmd, app)?;
+            }
+        }
 
         let timeout = frame_dur
             .checked_sub(last_tick.elapsed())
@@ -239,6 +296,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             app.check_advance()?;
             app.tick_video();
             last_tick = Instant::now();
+        }
+
+        // Publish current metadata + playback state to the OS.
+        if let Some(m) = media.as_deref_mut() {
+            m.sync(app);
         }
 
         if app.should_quit {

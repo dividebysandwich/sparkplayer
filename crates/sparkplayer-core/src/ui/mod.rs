@@ -18,7 +18,7 @@ mod panels;
 mod video_panel;
 mod visualizers;
 
-use overlays::{draw_escape_menu, draw_help};
+use overlays::{draw_escape_menu, draw_help, draw_search};
 use panels::{
     draw_album_art, draw_browser, draw_footer, draw_fullscreen_art, draw_now_playing,
     draw_playlist,
@@ -75,6 +75,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         if app.show_escape_menu {
             draw_escape_menu(frame, area, app);
+        }
+        if app.show_search {
+            draw_search(frame, area, app);
         }
         return;
     }
@@ -136,6 +139,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.show_escape_menu {
         draw_escape_menu(frame, area, app);
+    }
+    if app.show_search {
+        draw_search(frame, area, app);
     }
 }
 

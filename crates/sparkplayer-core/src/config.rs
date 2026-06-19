@@ -23,7 +23,17 @@ pub struct Config {
     pub playing_index: Option<usize>,
     /// Playback position of that track, in seconds.
     pub position_secs: f64,
+
+    /// Favorited track paths (order is not significant).
+    pub favorites: Vec<String>,
+    /// Recently-played track paths, most-recent first, capped at [`RECENT_CAP`].
+    pub recent: Vec<String>,
+    /// Per-track play counts as `(path, count)` pairs.
+    pub play_counts: Vec<(String, u32)>,
 }
+
+/// How many entries the recently-played list keeps.
+pub const RECENT_CAP: usize = 50;
 
 impl Default for Config {
     fn default() -> Self {
@@ -37,6 +47,9 @@ impl Default for Config {
             playlist: Vec::new(),
             playing_index: None,
             position_secs: 0.0,
+            favorites: Vec::new(),
+            recent: Vec::new(),
+            play_counts: Vec::new(),
         }
     }
 }
@@ -80,6 +93,23 @@ impl Config {
                     }
                 }
                 "track" if !val.is_empty() => cfg.playlist.push(val.to_string()),
+                "favorite" if !val.is_empty() => cfg.favorites.push(val.to_string()),
+                "recent" if !val.is_empty() => {
+                    if cfg.recent.len() < RECENT_CAP {
+                        cfg.recent.push(val.to_string());
+                    }
+                }
+                // Format: `playcount = "<count>|<path>"`.
+                "playcount" => {
+                    if let Some((count, path)) = val.split_once('|') {
+                        if let Ok(n) = count.trim().parse::<u32>() {
+                            let path = path.trim();
+                            if !path.is_empty() {
+                                cfg.play_counts.push((path.to_string(), n));
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -106,6 +136,15 @@ impl Config {
         for track in &self.playlist {
             out.push_str(&format!("track = \"{}\"\n", track));
         }
+        for fav in &self.favorites {
+            out.push_str(&format!("favorite = \"{}\"\n", fav));
+        }
+        for path in self.recent.iter().take(RECENT_CAP) {
+            out.push_str(&format!("recent = \"{}\"\n", path));
+        }
+        for (path, count) in &self.play_counts {
+            out.push_str(&format!("playcount = \"{}|{}\"\n", count, path));
+        }
         out
     }
 }
@@ -129,6 +168,15 @@ mod tests {
             ],
             playing_index: Some(1),
             position_secs: 42.5,
+            favorites: vec!["/home/me/Music/a.flac".to_string()],
+            recent: vec![
+                "/home/me/Music/b.mp3".to_string(),
+                "/home/me/Music/a.flac".to_string(),
+            ],
+            play_counts: vec![
+                ("/home/me/Music/a.flac".to_string(), 7),
+                ("/home/me/Music/b.mp3".to_string(), 3),
+            ],
         };
         let parsed = Config::parse(&cfg.serialize());
         assert_eq!(parsed, cfg);
