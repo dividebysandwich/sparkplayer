@@ -47,7 +47,13 @@ pub struct MediaOs {
     controls: MediaControls,
     rx: Receiver<MediaCommand>,
     last_meta: Option<MetaKey>,
-    last_stopped: bool,
+    /// Last playback state pushed: `None` = stopped, `Some(true/false)` =
+    /// paused/playing. Used to push only on change (souvlaki's service thread
+    /// processes events on a channel — flooding it every frame backs it up and
+    /// stalls shutdown, which joins that thread).
+    last_state: Option<Option<bool>>,
+    /// `clock_secs` at the last push, for a coarse position refresh.
+    last_push_secs: f64,
     cover_path: Option<PathBuf>,
 }
 
@@ -93,7 +99,8 @@ impl MediaOs {
             controls,
             rx,
             last_meta: None,
-            last_stopped: false,
+            last_state: None,
+            last_push_secs: 0.0,
             cover_path: None,
         })
     }
@@ -103,8 +110,13 @@ impl MediaOs {
         self.rx.try_iter().collect()
     }
 
-    /// Push the current track metadata and playback state to the OS. Metadata is
-    /// only re-sent when the track changes; playback state + progress every call.
+    /// Push the current track metadata and playback state to the OS.
+    ///
+    /// Both are sent sparingly — metadata only when the track changes, playback
+    /// only when the play/pause/stop state changes plus a coarse ~1s position
+    /// refresh. souvlaki's service thread drains these from a channel and
+    /// shutdown joins it, so pushing every frame would back the channel up and
+    /// stall (or hang) exit.
     pub fn sync(&mut self, app: &App) {
         let meta = &app.current_meta;
         let title = meta.title.clone().unwrap_or_else(|| {
@@ -116,7 +128,8 @@ impl MediaOs {
         let artist = meta.artist.clone().unwrap_or_default();
 
         let key: MetaKey = (app.playing_index, title.clone(), artist.clone());
-        if app.playing_index.is_some() && self.last_meta.as_ref() != Some(&key) {
+        let meta_changed = app.playing_index.is_some() && self.last_meta.as_ref() != Some(&key);
+        if meta_changed {
             let cover_url = self.write_cover(meta.artwork.as_deref());
             let album = meta.album.clone().unwrap_or_default();
             let _ = self.controls.set_metadata(MediaMetadata {
@@ -129,23 +142,27 @@ impl MediaOs {
             self.last_meta = Some(key);
         }
 
-        let stopped = app.playing_index.is_none();
-        let paused = app.audio.is_paused();
-        let progress = Some(MediaPosition(app.position()));
-        if stopped {
-            if !self.last_stopped {
-                let _ = self.controls.set_playback(MediaPlayback::Stopped);
-                self.last_stopped = true;
-            }
+        let state = if app.playing_index.is_none() {
+            None
+        } else {
+            Some(app.audio.is_paused())
+        };
+        let now = app.clock_secs;
+        let state_changed = self.last_state != Some(state);
+        // Refresh position roughly once a second while actively playing.
+        let periodic = matches!(state, Some(false)) && (now - self.last_push_secs) >= 1.0;
+        if !(meta_changed || state_changed || periodic) {
             return;
         }
-        self.last_stopped = false;
-        let playback = if paused {
-            MediaPlayback::Paused { progress }
-        } else {
-            MediaPlayback::Playing { progress }
+        let progress = Some(MediaPosition(app.position()));
+        let playback = match state {
+            None => MediaPlayback::Stopped,
+            Some(true) => MediaPlayback::Paused { progress },
+            Some(false) => MediaPlayback::Playing { progress },
         };
         let _ = self.controls.set_playback(playback);
+        self.last_state = Some(state);
+        self.last_push_secs = now;
     }
 
     /// Write artwork bytes to a stable temp file and return a `file://` URL, so

@@ -206,7 +206,21 @@ fn main() -> Result<()> {
     let res = run_loop(&mut terminal, &mut app, idx_rx, media.as_mut());
     restore_terminal(&mut terminal).ok();
     app.save_session();
-    res
+
+    // Quitting must be instant. Background integrations stall their own
+    // teardown on some systems — most notably souvlaki's D-Bus service thread,
+    // which its `Drop` *joins* and which can block when a desktop MPRIS consumer
+    // is connected. Because `media` would drop before `app`, that stall leaves
+    // the process alive with audio still playing until the user hits Ctrl-C.
+    // We've already persisted state and restored the terminal, so stop the audio
+    // and exit the process directly rather than unwinding those Drops. The OS
+    // reclaims the audio device and closes the D-Bus connection (unregistering
+    // the MPRIS name) on process exit.
+    app.audio.stop();
+    if let Err(e) = &res {
+        eprintln!("Error: {e}");
+    }
+    std::process::exit(if res.is_ok() { 0 } else { 1 });
 }
 
 /// Translate an OS media-control request into an app action.
