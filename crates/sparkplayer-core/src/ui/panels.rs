@@ -566,20 +566,95 @@ pub(super) fn draw_fullscreen_art(frame: &mut Frame, area: Rect, app: &mut App) 
         area,
     );
 
+    // Reserve a single unobtrusive row at the very bottom for the time bar when
+    // something is playing and there is height to spare; the art fills the rest.
+    let show_bar = app.playing_index.is_some() && area.height >= 4;
+    let (art_area, bar_area) = if show_bar {
+        let h = area.height - 1;
+        (
+            Rect::new(area.x, area.y, area.width, h),
+            Some(Rect::new(area.x, area.y + h, area.width, 1)),
+        )
+    } else {
+        (area, None)
+    };
+
     if !app.art.has_art() {
         let notice = Paragraph::new("No album art")
             .style(Style::default().fg(dim()))
             .alignment(Alignment::Center);
-        let y = area.y + area.height / 2;
-        let line = Rect::new(area.x, y, area.width, 1);
+        let y = art_area.y + art_area.height / 2;
+        let line = Rect::new(art_area.x, y, art_area.width, 1);
         frame.render_widget(notice, line);
+        if let Some(bar) = bar_area {
+            draw_art_time_bar(frame, bar, app);
+        }
         return;
     }
 
     // Record the rect for the web `<img>` overlay, then let the backend paint
     // the art (native: ratatui-image; web: no-op, the overlay floats above).
-    app.last_art_rect = Some(area);
-    app.art.render(frame, area);
+    app.last_art_rect = Some(art_area);
+    app.art.render(frame, art_area);
+    if let Some(bar) = bar_area {
+        draw_art_time_bar(frame, bar, app);
+    }
+}
+
+/// A compact single-row progress bar with the elapsed / total time on either
+/// side, drawn along the bottom of the fullscreen album art. Deliberately thin
+/// and dim so it stays out of the way of the artwork.
+fn draw_art_time_bar(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // Small horizontal inset so the bar doesn't run flush into the edges.
+    let inset = if area.width >= 8 { 2 } else { 0 };
+    let row = Rect::new(
+        area.x + inset,
+        area.y,
+        area.width.saturating_sub(inset * 2),
+        1,
+    );
+    let pos = app.position();
+    let dur = app.current_duration.unwrap_or(Duration::ZERO);
+    let ratio = if dur.as_secs_f64() > 0.0 {
+        (pos.as_secs_f64() / dur.as_secs_f64()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let left = fmt_time(pos);
+    let right = if dur.is_zero() {
+        String::from("--:--")
+    } else {
+        fmt_time(dur)
+    };
+
+    let w = row.width as usize;
+    let labels = left.chars().count() + right.chars().count() + 2; // a space each side
+    if w <= labels {
+        // Too narrow for a groove — just show "elapsed / total".
+        let line = Line::from(Span::styled(
+            format!("{left} / {right}"),
+            Style::default().fg(dim()),
+        ));
+        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), row);
+        return;
+    }
+    let bar_w = w - labels;
+    let fill = (ratio * bar_w as f64).round() as usize;
+    let filled: String = "━".repeat(fill);
+    let rest: String = "─".repeat(bar_w - fill);
+
+    let line = Line::from(vec![
+        Span::styled(left, Style::default().fg(text())),
+        Span::raw(" "),
+        Span::styled(filled, Style::default().fg(cyan())),
+        Span::styled(rest, Style::default().fg(dim())),
+        Span::raw(" "),
+        Span::styled(right, Style::default().fg(text())),
+    ]);
+    frame.render_widget(Paragraph::new(line), row);
 }
 
 pub(super) fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
