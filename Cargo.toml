@@ -14,7 +14,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "1.2.1"
+version = "1.2.2"
 edition = "2024"
 authors = ["dividebysandwich"]
 license = "GPL-2.0-only"

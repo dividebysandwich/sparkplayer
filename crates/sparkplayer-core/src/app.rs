@@ -28,6 +28,22 @@ const MIN_AV_OFFSET_SECS: f64 = 0.050;
 const AV_OFFSET_SLEW_PER_TICK: f64 = 0.005;
 pub const AV_OFFSET_STEP_SECS: f64 = 0.025;
 
+/// Disagreement (seconds) between the smoothed video clock and the raw audio
+/// position that forces a hard resync. Must sit *above* one audio-buffer
+/// staircase step (hundreds of ms on high-latency backends) so the normal
+/// wobble is filtered, not snapped, yet *below* a seek (>=5 s here) so seeks
+/// snap instantly instead of slewing.
+const VIDEO_CLOCK_RESYNC_SECS: f64 = 1.0;
+/// A gap between ticks larger than this means we were parked (pause/resume) or
+/// stalled; re-seed from the audio position rather than free-running across it.
+const VIDEO_CLOCK_STALL_SECS: f64 = 0.5;
+/// Time constant of the master-clock low-pass filter. Long enough to attenuate
+/// a coarse (hundreds-of-ms) audio-callback staircase down to a few ms of
+/// ripple — well under one frame — short enough to settle within a couple of
+/// seconds after the initial sync. Audio-vs-CPU crystal drift is only ~ppm, so
+/// this slow correction still tracks it easily.
+const VIDEO_CLOCK_SMOOTH_TAU_SECS: f64 = 1.5;
+
 /// The project's GitHub page, opened from the escape menu's "GitHub" entry.
 pub const GITHUB_URL: &str = "https://github.com/dividebysandwich/sparkplayer";
 
@@ -231,6 +247,21 @@ pub struct App {
     pub video_render_ewma_secs: f64,
     pub auto_av_offset: bool,
 
+    /// Free-running media clock used to pace video, slewed toward the audio
+    /// position rather than read from it raw. The audio sink consumes samples
+    /// a whole buffer at a time, so `audio.position()` is flat for several
+    /// video frames and then jumps by a buffer's worth — driving the frame
+    /// selector straight off that staircase makes motion freeze-then-skip.
+    /// Instead `video_clock_secs` advances by real wall-clock time each tick
+    /// and is nudged toward the audio position, so video moves smoothly while
+    /// staying locked to audio over time (the approach VLC/mpv take).
+    video_clock_secs: f64,
+    /// `clock_secs` captured at the last `smooth_video_clock` update, used to
+    /// measure real elapsed time between video ticks.
+    video_clock_wall: f64,
+    /// Whether `video_clock_secs` has been seeded from a real audio position.
+    video_clock_init: bool,
+
     pub subtitles: SubtitleSet,
     pub active_subtitle_track: Option<usize>,
     pub current_subtitle_text: Option<String>,
@@ -340,6 +371,9 @@ impl App {
             audio_output_latency_secs,
             video_render_ewma_secs: 0.0,
             auto_av_offset: true,
+            video_clock_secs: 0.0,
+            video_clock_wall: 0.0,
+            video_clock_init: false,
             subtitles: SubtitleSet::default(),
             active_subtitle_track: None,
             current_subtitle_text: None,
@@ -571,6 +605,49 @@ impl App {
         Ok(())
     }
 
+    /// Advance the smoothed video clock toward `raw_audio_secs` and return its
+    /// new value. See `video_clock_secs` for the rationale. Free-runs forward
+    /// by real wall-clock time, then corrects a small fraction of the residual
+    /// error toward the (bursty) audio truth; large discontinuities snap.
+    fn smooth_video_clock(&mut self, raw_audio_secs: f64) -> f64 {
+        let wall = self.clock_secs;
+        if !self.video_clock_init {
+            self.video_clock_secs = raw_audio_secs;
+            self.video_clock_wall = wall;
+            self.video_clock_init = true;
+            return self.video_clock_secs;
+        }
+        let dt = wall - self.video_clock_wall;
+        self.video_clock_wall = wall;
+        // Snap (don't slew) on a backward/oversized gap (platform clock jump,
+        // pause/resume, long stall) or any large discontinuity (a seek or track
+        // change). Everything else is the normal staircase, which we filter.
+        if dt < 0.0
+            || dt > VIDEO_CLOCK_STALL_SECS
+            || (raw_audio_secs - self.video_clock_secs).abs() > VIDEO_CLOCK_RESYNC_SECS
+        {
+            self.video_clock_secs = raw_audio_secs;
+            return self.video_clock_secs;
+        }
+        // Run forward in real time, then correct toward audio with a slow,
+        // time-constant-based gain. Because the raw clock is centered on true
+        // playback, filtering its staircase introduces no net A/V lag; `alpha`
+        // is derived from `dt` so the time constant — and thus the smoothing —
+        // is independent of how often this is called.
+        self.video_clock_secs += dt;
+        let err = raw_audio_secs - self.video_clock_secs;
+        let alpha = 1.0 - (-dt / VIDEO_CLOCK_SMOOTH_TAU_SECS).exp();
+        self.video_clock_secs += err * alpha;
+        self.video_clock_secs
+    }
+
+    /// Force the smoothed video clock to re-seed from the audio position on the
+    /// next tick. Call after seeks/track changes so the clock snaps rather than
+    /// slewing across the discontinuity.
+    fn reset_video_clock(&mut self) {
+        self.video_clock_init = false;
+    }
+
     /// Drive video display: select the current subtitle cue and hand the
     /// display position to the video backend, then fold the backend's reported
     /// render time into the auto A/V offset (native only; web returns `None`).
@@ -578,10 +655,17 @@ impl App {
         if !self.video.is_loaded() {
             return;
         }
+        let raw = self.position().as_secs_f64();
+        let duration = self.current_duration.map(|d| d.as_secs_f64());
         if self.audio.is_paused() {
+            // Keep the window's clock fed (paused, so it holds the frame) and
+            // its OSD progress bar accurate even while we don't advance video.
+            self.video
+                .publish_clock((raw - self.av_offset_secs).max(0.0), true, duration);
             return;
         }
-        let pos = self.position().as_secs_f64() - self.av_offset_secs;
+        let pos = self.smooth_video_clock(raw) - self.av_offset_secs;
+        self.video.publish_clock(pos.max(0.0), false, duration);
         if pos < 0.0 {
             return;
         }
@@ -675,17 +759,28 @@ impl App {
             Ok(()) => {
                 let pos = self.audio.position();
                 self.video.seek(pos);
+                self.reset_video_clock();
                 if self.auto_av_offset {
                     self.av_offset_secs = baseline_av_offset(self.audio_output_latency_secs);
                     self.video_render_ewma_secs = 0.0;
                 }
                 self.status = format!("Seek: {} ({:+.0}s)", fmt_short(pos), delta);
+                // Flash the fullscreen OSD (progress bar + time) on seek.
+                self.video.show_osd(None);
             }
             Err(e) => self.status = format!("Seek error: {e}"),
         }
     }
 
     pub fn queue_selected_browser(&mut self) {
+        // The first entry is the ".." parent shortcut (mirrors the browser UI).
+        // Queuing it would recursively scan the parent tree — near the
+        // filesystem root that walks /proc, /sys, mounts, etc. and hangs — so
+        // refuse it; navigation (Enter) is the way to move up.
+        if self.browser_selected == 0 && self.browser_dir.parent().is_some() {
+            self.status = String::from("Can't queue the \"..\" entry");
+            return;
+        }
         let Some(path) = self.browser_entries.get(self.browser_selected).cloned() else {
             return;
         };
@@ -1021,6 +1116,7 @@ impl App {
             ),
             None => String::from("Subtitles: off"),
         };
+        self.video.show_osd(Some(self.status.clone()));
     }
 
     /// Step the active audio track by ±1, wrapping around. Audio tracks (unlike
@@ -1045,6 +1141,8 @@ impl App {
             }
             Err(e) => self.status = format!("Audio track switch failed: {e}"),
         }
+        // Surface the change on the fullscreen OSD when a video window is up.
+        self.video.show_osd(Some(self.status.clone()));
     }
 
     /// Advance to the next audio track (the `b` key), mirroring `c` for subtitles.
@@ -1157,6 +1255,7 @@ impl App {
             ),
             None => String::from("Subtitles: off"),
         };
+        self.video.show_osd(Some(self.status.clone()));
     }
 
     pub fn reset_av_offset_auto(&mut self) {
@@ -1738,6 +1837,38 @@ impl App {
                         self.close_escape_menu();
                     }
                 }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // While the fullscreen SDL video window owns the screen, the playlist
+        // and file-browser panels are hidden behind it, so suppress every key
+        // that would manipulate them (selection, queueing, removing, filtering,
+        // search, focus switching). Only transport / playback controls remain.
+        if self.video.external_window_enabled() {
+            match code {
+                CoreKey::Char('q') => self.should_quit = true,
+                CoreKey::Char('c') if ctrl => self.should_quit = true,
+                CoreKey::Esc | CoreKey::Char('f') => {
+                    self.video.set_external_window(false);
+                    self.fullscreen = FullscreenMode::Off;
+                    self.status = String::from("Exited fullscreen video");
+                }
+                CoreKey::Char(' ') => self.audio.toggle_pause(),
+                CoreKey::Char('n') => self.next_track()?,
+                CoreKey::Char('p') => self.prev_track()?,
+                CoreKey::Left if ctrl => self.seek_seconds(-30.0),
+                CoreKey::Right if ctrl => self.seek_seconds(30.0),
+                CoreKey::Left => self.seek_seconds(-10.0),
+                CoreKey::Right => self.seek_seconds(10.0),
+                CoreKey::Char('-') | CoreKey::Char('_') => self.volume_step(-0.05),
+                CoreKey::Char('+') | CoreKey::Char('=') => self.volume_step(0.05),
+                CoreKey::Char('b') => self.cycle_audio_track(),
+                CoreKey::Char('c') => self.cycle_subtitle_track(),
+                CoreKey::Char('[') => self.adjust_av_offset(-AV_OFFSET_STEP_SECS),
+                CoreKey::Char(']') => self.adjust_av_offset(AV_OFFSET_STEP_SECS),
+                CoreKey::Char('r') => self.cycle_repeat(),
                 _ => {}
             }
             return Ok(());

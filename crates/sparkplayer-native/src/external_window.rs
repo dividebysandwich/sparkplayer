@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use anyhow::{Context, Result};
@@ -13,9 +13,105 @@ use sdl2::pixels::{Color, PixelFormatEnum};
 use sdl2::rect::Rect;
 use sdl2::render::BlendMode;
 
-use crate::video::VideoFrame;
+use crate::video::{SharedQueue, select_frame};
 
 const WINDOW_TITLE: &str = "SparkPlayer Video";
+
+/// How long the on-screen display (progress bar + time / message) stays up
+/// after the last seek, track, or subtitle change.
+const OSD_DURATION: Duration = Duration::from_millis(2500);
+
+/// One published playback-clock reading. The window thread linearly
+/// extrapolates `pos` forward by real time since `at_nanos` (unless `paused`),
+/// so motion stays smooth at vsync even though the main loop only republishes
+/// at its ~30 Hz tick rate — the smoothing itself lives in the core clock.
+#[derive(Clone, Copy)]
+struct ClockSample {
+    pos: f64,
+    at_nanos: u64,
+    paused: bool,
+}
+
+/// Playback state shared from the main loop to the SDL window thread. The
+/// window owns frame pacing: each vsync it reads the extrapolated position,
+/// pulls the matching frame from the decoder queue, and presents — rather than
+/// being fed pre-selected frames at the main loop's coarse, jittery cadence.
+pub struct VideoSync {
+    epoch: Instant,
+    sample: Mutex<Option<ClockSample>>,
+    duration_secs: Mutex<Option<f64>>,
+    queue: Mutex<Option<Arc<Mutex<SharedQueue>>>>,
+    last_drawn: AtomicI64,
+    osd_gen: AtomicU64,
+    osd_text: Mutex<Option<String>>,
+}
+
+impl VideoSync {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            epoch: Instant::now(),
+            sample: Mutex::new(None),
+            duration_secs: Mutex::new(None),
+            queue: Mutex::new(None),
+            last_drawn: AtomicI64::new(i64::MIN),
+            osd_gen: AtomicU64::new(0),
+            osd_text: Mutex::new(None),
+        })
+    }
+
+    /// Publish the latest smoothed display position (seconds), pause state and
+    /// total duration. Called by the main loop each video tick.
+    pub fn publish(&self, pos: f64, paused: bool, duration: Option<f64>) {
+        let at_nanos = self.epoch.elapsed().as_nanos() as u64;
+        if let Ok(mut s) = self.sample.lock() {
+            *s = Some(ClockSample { pos, at_nanos, paused });
+        }
+        if let Ok(mut d) = self.duration_secs.lock() {
+            *d = duration;
+        }
+    }
+
+    /// Point the window thread at a (new) decoder queue and reset the
+    /// already-drawn marker so the next frame is presented.
+    pub fn set_queue(&self, q: Arc<Mutex<SharedQueue>>) {
+        if let Ok(mut slot) = self.queue.lock() {
+            *slot = Some(q);
+        }
+        self.last_drawn.store(i64::MIN, Ordering::Relaxed);
+    }
+
+    /// Reset the already-drawn marker (after a seek clears the queue) so the
+    /// first frame at the new position is presented even if its PTS collides.
+    pub fn reset_frame_marker(&self) {
+        self.last_drawn.store(i64::MIN, Ordering::Relaxed);
+    }
+
+    /// Flash the OSD with an optional message line (the progress bar + time are
+    /// always drawn while it is up).
+    pub fn show_osd(&self, message: Option<String>) {
+        if let Ok(mut t) = self.osd_text.lock() {
+            *t = message;
+        }
+        self.osd_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The current extrapolated display position and total duration, or None
+    /// before the first sample has been published.
+    fn display_state(&self) -> Option<(f64, Option<f64>)> {
+        let sample = (*self.sample.lock().ok()?)?;
+        let dur = self.duration_secs.lock().ok().and_then(|d| *d);
+        let pos = if sample.paused {
+            sample.pos
+        } else {
+            let now = self.epoch.elapsed().as_nanos() as u64;
+            // Cap the extrapolation so a stalled main loop can't run the clock
+            // away ahead of the audio it is supposed to track.
+            let dt = (now.saturating_sub(sample.at_nanos) as f64 / 1e9).min(0.25);
+            sample.pos + dt
+        };
+        Some((pos.max(0.0), dur))
+    }
+}
 
 /// A keyboard event forwarded from the SDL window back into the main loop so
 /// the same shortcuts work whether the terminal or the playback window has
@@ -29,7 +125,6 @@ pub struct ForwardedKey {
 /// thread: the main loop pushes frames in, and the window's event pump pushes
 /// keyboard events back out.
 pub struct ExternalVideoWindow {
-    latest_frame: Arc<Mutex<Option<VideoFrame>>>,
     subtitle: Arc<Mutex<Option<String>>>,
     key_rx: Receiver<ForwardedKey>,
     stop: Arc<AtomicBool>,
@@ -38,15 +133,13 @@ pub struct ExternalVideoWindow {
 }
 
 impl ExternalVideoWindow {
-    pub fn spawn() -> Result<Self> {
-        let latest_frame: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
+    pub fn spawn(sync: Arc<VideoSync>) -> Result<Self> {
         let subtitle: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let (key_tx, key_rx): (Sender<ForwardedKey>, Receiver<ForwardedKey>) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         let init_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let (ready_tx, ready_rx) = channel::<Result<(), String>>();
 
-        let latest_frame_t = Arc::clone(&latest_frame);
         let subtitle_t = Arc::clone(&subtitle);
         let stop_t = Arc::clone(&stop);
         let init_err_t = Arc::clone(&init_err);
@@ -54,9 +147,7 @@ impl ExternalVideoWindow {
         let handle = thread::Builder::new()
             .name("sparkplayer-video-window".into())
             .spawn(move || {
-                if let Err(e) =
-                    run_window(latest_frame_t, subtitle_t, key_tx, stop_t, ready_tx)
-                {
+                if let Err(e) = run_window(sync, subtitle_t, key_tx, stop_t, ready_tx) {
                     *init_err_t.lock().unwrap() = Some(e.to_string());
                 }
             })
@@ -66,7 +157,6 @@ impl ExternalVideoWindow {
         // can surface a clean error to the user instead of silently failing.
         match ready_rx.recv_timeout(Duration::from_secs(3)) {
             Ok(Ok(())) => Ok(Self {
-                latest_frame,
                 subtitle,
                 key_rx,
                 stop,
@@ -83,14 +173,6 @@ impl ExternalVideoWindow {
     pub fn set_subtitle(&self, text: Option<String>) {
         if let Ok(mut slot) = self.subtitle.lock() {
             *slot = text;
-        }
-    }
-
-    /// Stash the most recent frame for the window thread to pick up. Older
-    /// pending frames are dropped — the window always renders the freshest.
-    pub fn submit_frame(&self, frame: VideoFrame) {
-        if let Ok(mut slot) = self.latest_frame.lock() {
-            *slot = Some(frame);
         }
     }
 
@@ -124,7 +206,7 @@ impl Drop for ExternalVideoWindow {
 }
 
 fn run_window(
-    latest_frame: Arc<Mutex<Option<VideoFrame>>>,
+    sync: Arc<VideoSync>,
     subtitle: Arc<Mutex<Option<String>>>,
     key_tx: Sender<ForwardedKey>,
     stop: Arc<AtomicBool>,
@@ -144,6 +226,11 @@ fn run_window(
             return Err(anyhow::anyhow!("sdl video subsystem: {e}"));
         }
     };
+
+    // Bilinear filtering so the video is smoothly interpolated when the screen
+    // resolution exceeds the frame's (the common case at fullscreen). Must be
+    // set before textures are created to take effect; at 1:1 it is a no-op.
+    sdl2::hint::set("SDL_RENDER_SCALE_QUALITY", "1");
 
     let window = match video_sub
         .window(WINDOW_TITLE, 1280, 720)
@@ -176,6 +263,14 @@ fn run_window(
     let mut tex_h: u32 = 0;
     let font: Option<FontVec> = load_system_font();
     let mut sub_cache: Option<SubtitleTexture> = None;
+    let mut osd_msg_cache: Option<SubtitleTexture> = None;
+    let mut osd_time_cache: Option<SubtitleTexture> = None;
+
+    // OSD lifetime is tracked here, on the render thread, off a generation
+    // counter the main loop bumps whenever it wants the OSD flashed.
+    let mut osd_seen_gen: u64 = 0;
+    let mut osd_until: Option<Instant> = None;
+    let mut osd_message: Option<String> = None;
 
     let mut event_pump = match sdl.event_pump() {
         Ok(e) => e,
@@ -187,7 +282,12 @@ fn run_window(
 
     let _ = ready_tx.send(Ok(()));
 
+    // Frame-rate floor so we never busy-spin if vsync turns out to be a no-op
+    // on the active driver; with real vsync `present()` already blocks longer.
+    let min_frame = Duration::from_micros(7000);
+
     'main: loop {
+        let loop_start = Instant::now();
         if stop.load(Ordering::Relaxed) {
             break 'main;
         }
@@ -222,16 +322,18 @@ fn run_window(
             }
         }
 
-        let frame_opt = latest_frame.lock().ok().and_then(|mut s| s.take());
-        let sub_text = subtitle.lock().ok().and_then(|s| s.clone());
+        // Pick the frame for the current (extrapolated) clock, at vsync. This
+        // is the crux of smooth pacing: selection happens here, locked to the
+        // display refresh, not at the main loop's coarse tick.
+        let (display_pos, duration) = sync.display_state().unwrap_or((0.0, None));
+        let queue = sync.queue.lock().ok().and_then(|q| q.clone());
+        let frame_opt = queue
+            .as_ref()
+            .and_then(|q| select_frame(q, &sync.last_drawn, display_pos));
         if let Some(frame) = frame_opt {
             if texture.is_none() || frame.width != tex_w || frame.height != tex_h {
                 texture = texture_creator
-                    .create_texture_streaming(
-                        PixelFormatEnum::RGB24,
-                        frame.width,
-                        frame.height,
-                    )
+                    .create_texture_streaming(PixelFormatEnum::RGB24, frame.width, frame.height)
                     .ok();
                 tex_w = frame.width;
                 tex_h = frame.height;
@@ -240,39 +342,145 @@ fn run_window(
                 let pitch = (frame.width * 3) as usize;
                 let _ = tex.update(None, &frame.data, pitch);
             }
-            canvas.set_draw_color(Color::BLACK);
-            canvas.clear();
-            let (out_w, out_h) = canvas.output_size().unwrap_or((tex_w, tex_h));
-            let video_rect = aspect_fit(tex_w, tex_h, out_w, out_h);
-            if let Some(tex) = texture.as_ref() {
-                let _ = canvas.copy(tex, None, video_rect);
-            }
-            // Subtitles: redraw the cached overlay if the line changed; blit
-            // centered along the video rect's bottom.
-            refresh_subtitle_cache(
-                &mut sub_cache,
+        }
+
+        let sub_text = subtitle.lock().ok().and_then(|s| s.clone());
+
+        // Latch a fresh OSD request onto a fixed-duration deadline.
+        let osd_gen = sync.osd_gen.load(Ordering::Relaxed);
+        if osd_gen != osd_seen_gen {
+            osd_seen_gen = osd_gen;
+            osd_until = Some(loop_start + OSD_DURATION);
+            osd_message = sync.osd_text.lock().ok().and_then(|t| t.clone());
+        }
+        let osd_active = osd_until.is_some_and(|t| loop_start < t);
+        if !osd_active {
+            osd_until = None;
+        }
+
+        canvas.set_draw_color(Color::BLACK);
+        canvas.clear();
+        let (out_w, out_h) = canvas.output_size().unwrap_or((tex_w.max(1), tex_h.max(1)));
+        let video_rect = aspect_fit(tex_w, tex_h, out_w, out_h);
+        if let Some(tex) = texture.as_ref() {
+            let _ = canvas.copy(tex, None, video_rect);
+        }
+        // Subtitles: redraw the cached overlay if the line changed; blit
+        // centered along the video rect's bottom.
+        refresh_subtitle_cache(
+            &mut sub_cache,
+            font.as_ref(),
+            sub_text.as_deref(),
+            &texture_creator,
+            out_w,
+        );
+        if let Some(cache) = sub_cache.as_ref() {
+            let sx = video_rect.x() + ((video_rect.width() as i32) - (cache.width as i32)) / 2;
+            let sy = video_rect.y() + (video_rect.height() as i32)
+                - (cache.height as i32)
+                - (video_rect.height() as i32 / 20).max(16);
+            let dst = Rect::new(sx, sy, cache.width, cache.height);
+            let _ = canvas.copy(&cache.texture, None, dst);
+        }
+        if osd_active {
+            draw_osd(
+                &mut canvas,
                 font.as_ref(),
-                sub_text.as_deref(),
                 &texture_creator,
+                &mut osd_msg_cache,
+                &mut osd_time_cache,
                 out_w,
+                out_h,
+                display_pos,
+                duration,
+                osd_message.as_deref(),
             );
-            if let Some(cache) = sub_cache.as_ref() {
-                let sx = video_rect.x()
-                    + ((video_rect.width() as i32) - (cache.width as i32)) / 2;
-                let sy = video_rect.y() + (video_rect.height() as i32)
-                    - (cache.height as i32)
-                    - (video_rect.height() as i32 / 20).max(16);
-                let dst = Rect::new(sx, sy, cache.width, cache.height);
-                let _ = canvas.copy(&cache.texture, None, dst);
-            }
-            canvas.present();
-        } else {
-            // No new frame — sleep briefly so we don't spin the CPU. Vsync on
-            // present() handles pacing when frames are arriving.
-            thread::sleep(Duration::from_millis(5));
+        }
+        canvas.present();
+
+        // With vsync this no-ops; without it, cap the spin.
+        let elapsed = loop_start.elapsed();
+        if elapsed < min_frame {
+            thread::sleep(min_frame - elapsed);
         }
     }
     Ok(())
+}
+
+/// Format seconds as `M:SS` (or `H:MM:SS` past an hour) for the OSD.
+fn fmt_clock(secs: f64) -> String {
+    let total = secs.max(0.0) as u64;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Draw the seek/track OSD: a translucent backdrop, a progress bar, the
+/// `position / duration` readout, and an optional message line above it.
+#[allow(clippy::too_many_arguments)]
+fn draw_osd<'r>(
+    canvas: &mut sdl2::render::Canvas<sdl2::video::Window>,
+    font: Option<&FontVec>,
+    creator: &'r sdl2::render::TextureCreator<sdl2::video::WindowContext>,
+    msg_cache: &mut Option<SubtitleTexture<'r>>,
+    time_cache: &mut Option<SubtitleTexture<'r>>,
+    out_w: u32,
+    out_h: u32,
+    pos: f64,
+    duration: Option<f64>,
+    message: Option<&str>,
+) {
+    canvas.set_blend_mode(BlendMode::Blend);
+
+    let bar_w = ((out_w as f32) * 0.8) as u32;
+    let bar_h = (((out_h as f32) * 0.012) as u32).max(6);
+    let bar_x = ((out_w as i32) - (bar_w as i32)) / 2;
+    let bar_y = (out_h as f32 * 0.86) as i32;
+
+    // Backdrop band behind the whole OSD for legibility over bright video.
+    let band_top = bar_y - (out_h as i32 / 6);
+    canvas.set_draw_color(Color::RGBA(0, 0, 0, 120));
+    let _ = canvas.fill_rect(Rect::new(0, band_top, out_w, (out_h as i32 - band_top) as u32));
+
+    // Progress bar: track, then the played portion.
+    canvas.set_draw_color(Color::RGBA(255, 255, 255, 70));
+    let _ = canvas.fill_rect(Rect::new(bar_x, bar_y, bar_w, bar_h));
+    let frac = match duration {
+        Some(d) if d > 0.0 => (pos / d).clamp(0.0, 1.0),
+        _ => 0.0,
+    };
+    let fill_w = (bar_w as f64 * frac) as u32;
+    if fill_w > 0 {
+        canvas.set_draw_color(Color::RGBA(80, 170, 255, 235));
+        let _ = canvas.fill_rect(Rect::new(bar_x, bar_y, fill_w, bar_h));
+    }
+
+    // Time readout just above the bar, left-aligned with it.
+    let time_str = match duration {
+        Some(d) if d > 0.0 => format!("{} / {}", fmt_clock(pos), fmt_clock(d)),
+        _ => fmt_clock(pos),
+    };
+    refresh_subtitle_cache(time_cache, font, Some(&time_str), creator, out_w);
+    if let Some(c) = time_cache.as_ref() {
+        let ty = bar_y - (c.height as i32) - 8;
+        let dst = Rect::new(bar_x, ty, c.width, c.height);
+        let _ = canvas.copy(&c.texture, None, dst);
+    }
+
+    // Optional message (e.g. "Audio: English") centered above the time.
+    refresh_subtitle_cache(msg_cache, font, message, creator, out_w);
+    if let Some(c) = msg_cache.as_ref() {
+        let time_h = time_cache.as_ref().map(|t| t.height as i32).unwrap_or(0);
+        let my = bar_y - time_h - (c.height as i32) - 16;
+        let mx = bar_x + ((bar_w as i32) - (c.width as i32)) / 2;
+        let dst = Rect::new(mx, my, c.width, c.height);
+        let _ = canvas.copy(&c.texture, None, dst);
+    }
 }
 
 /// Compute a destination rect that fits `(src_w, src_h)` inside `(dst_w, dst_h)`

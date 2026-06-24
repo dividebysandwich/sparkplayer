@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -16,7 +17,7 @@ use sparkplayer_core::backend::{AlbumArtRenderer, ConfigStore, CoreKeyEvent, Vid
 use sparkplayer_core::config::Config;
 use sparkplayer_core::library::{self, TrackRef};
 
-use crate::external_window::ExternalVideoWindow;
+use crate::external_window::{ExternalVideoWindow, VideoSync};
 use crate::map_key;
 use crate::video::VideoStream;
 
@@ -88,6 +89,10 @@ pub struct NativeVideoBackend {
     video_dims: Option<(u32, u32)>,
     external_window: Option<ExternalVideoWindow>,
     external_window_enabled: bool,
+    /// Playback state shared with the SDL window thread, which uses it to pace
+    /// frame selection at vsync and to drive the OSD. Lives for the backend's
+    /// lifetime so `publish_clock`/`show_osd` work even before a window spawns.
+    sync: Arc<VideoSync>,
 }
 
 impl NativeVideoBackend {
@@ -99,6 +104,7 @@ impl NativeVideoBackend {
             video_dims: None,
             external_window: None,
             external_window_enabled: false,
+            sync: VideoSync::new(),
         }
     }
 
@@ -106,7 +112,11 @@ impl NativeVideoBackend {
         if self.external_window.is_some() || self.video.is_none() {
             return;
         }
-        match ExternalVideoWindow::spawn() {
+        // Point the window at the current decoder queue before it starts.
+        if let Some(v) = self.video.as_ref() {
+            self.sync.set_queue(v.queue_handle());
+        }
+        match ExternalVideoWindow::spawn(Arc::clone(&self.sync)) {
             Ok(w) => {
                 self.external_window = Some(w);
                 self.video_protocol = None;
@@ -131,7 +141,13 @@ impl VideoBackend for NativeVideoBackend {
                 let dims = (v.width, v.height);
                 self.video_dims = Some(dims);
                 self.video = Some(v);
-                if self.external_window_enabled {
+                if self.external_window.is_some() {
+                    // Window already open (switching videos): repoint it at the
+                    // new decoder queue.
+                    if let Some(v) = self.video.as_ref() {
+                        self.sync.set_queue(v.queue_handle());
+                    }
+                } else if self.external_window_enabled {
                     self.spawn_external_window();
                 }
                 Some(dims)
@@ -159,7 +175,18 @@ impl VideoBackend for NativeVideoBackend {
     fn seek(&self, target: Duration) {
         if let Some(v) = self.video.as_ref() {
             v.seek(target);
+            // The seek clears the decoder queue; let the window present the
+            // first frame at the new position.
+            self.sync.reset_frame_marker();
         }
+    }
+
+    fn publish_clock(&self, display_pos: f64, paused: bool, duration: Option<f64>) {
+        self.sync.publish(display_pos, paused, duration);
+    }
+
+    fn show_osd(&self, message: Option<String>) {
+        self.sync.show_osd(message);
     }
 
     fn advance(&mut self, display_pos: f64, _paused: bool, subtitle: Option<&str>) -> Option<f64> {
@@ -168,19 +195,17 @@ impl VideoBackend for NativeVideoBackend {
             self.external_window = None;
             self.external_window_enabled = false;
         }
-        let video = self.video.as_ref()?;
-        let frame = video.frame_at(display_pos)?;
 
-        // If the SDL window is up, render there exclusively — the in-terminal
-        // image path is expensive and pointless when the window has focus.
+        // If the SDL window is up it owns frame selection (vsync-locked); we
+        // only feed it the current subtitle line. The in-terminal image path is
+        // skipped entirely — it is expensive and pointless behind the window.
         if let Some(window) = self.external_window.as_ref() {
-            self.video_dims = Some((frame.width, frame.height));
-            self.video_protocol = None;
             window.set_subtitle(subtitle.map(|s| s.to_string()));
-            window.submit_frame(frame);
             return None;
         }
 
+        let video = self.video.as_ref()?;
+        let frame = video.frame_at(display_pos)?;
         let started = Instant::now();
         let buf = image::RgbImage::from_raw(frame.width, frame.height, frame.data)?;
         let dyn_img = image::DynamicImage::ImageRgb8(buf);

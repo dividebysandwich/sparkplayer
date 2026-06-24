@@ -125,6 +125,13 @@ pub trait VideoBackend {
     /// updating the current subtitle overlay. Returns the time spent preparing
     /// the frame in seconds (native, for the A/V EWMA) or `None`.
     fn advance(&mut self, display_pos: f64, paused: bool, subtitle: Option<&str>) -> Option<f64>;
+    /// Publish the smoothed display position, pause state, and total duration
+    /// for the external playback window's vsync-locked frame pacing and OSD.
+    /// No-op without an external window (web, or the native terminal path).
+    fn publish_clock(&self, _display_pos: f64, _paused: bool, _duration: Option<f64>) {}
+    /// Flash the external window's OSD (progress bar + time, plus an optional
+    /// message line such as a track/subtitle change). No-op without a window.
+    fn show_osd(&self, _message: Option<String>) {}
     /// Draw the current video frame into `area` (native) or reposition the
     /// overlay element to match `area` (web).
     fn render(&mut self, frame: &mut Frame, area: Rect);

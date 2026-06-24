@@ -20,10 +20,41 @@ pub struct VideoFrame {
     pub data: Vec<u8>,
 }
 
-struct SharedQueue {
+pub(crate) struct SharedQueue {
     frames: VecDeque<VideoFrame>,
     seek_target_ms: Option<i64>,
     eof: bool,
+}
+
+/// Pop the most-recent frame whose PTS is at or before `target_secs`, dropping
+/// older frames. Returns None when no such frame is ready or when the same
+/// frame was already returned (tracked via `last_drawn_pts_ms`). Shared by the
+/// in-terminal path (`VideoStream::frame_at`) and the SDL window thread, which
+/// drives its own selection at vsync against a separate `last_drawn` marker.
+pub(crate) fn select_frame(
+    queue: &Mutex<SharedQueue>,
+    last_drawn_pts_ms: &AtomicI64,
+    target_secs: f64,
+) -> Option<VideoFrame> {
+    let target_ms = (target_secs * 1000.0) as i64;
+    let mut q = queue.lock().ok()?;
+    let mut selected: Option<VideoFrame> = None;
+    while let Some(front) = q.frames.front() {
+        let front_ms = (front.pts_secs * 1000.0) as i64;
+        if front_ms <= target_ms {
+            selected = q.frames.pop_front();
+        } else {
+            break;
+        }
+    }
+    let frame = selected?;
+    let frame_ms = (frame.pts_secs * 1000.0) as i64;
+    let last = last_drawn_pts_ms.load(Ordering::Relaxed);
+    if frame_ms == last {
+        return None;
+    }
+    last_drawn_pts_ms.store(frame_ms, Ordering::Relaxed);
+    Some(frame)
 }
 
 /// Threaded video decoder. Frames are decoded ahead of time and queued in PTS
@@ -147,27 +178,13 @@ impl VideoStream {
     /// Older frames are discarded. Returns None if no such frame is ready
     /// (decoder still warming up) or if the same frame was already returned.
     pub fn frame_at(&self, target_secs: f64) -> Option<VideoFrame> {
-        let target_ms = (target_secs * 1000.0) as i64;
-        let mut q = self.inner.lock().ok()?;
-        // Drop frames that are stale (older than target) but keep the most
-        // recent stale one in case the queue tail is still in the future.
-        let mut selected: Option<VideoFrame> = None;
-        while let Some(front) = q.frames.front() {
-            let front_ms = (front.pts_secs * 1000.0) as i64;
-            if front_ms <= target_ms {
-                selected = q.frames.pop_front();
-            } else {
-                break;
-            }
-        }
-        let frame = selected?;
-        let frame_ms = (frame.pts_secs * 1000.0) as i64;
-        let last = self.last_drawn_pts_ms.load(Ordering::Relaxed);
-        if frame_ms == last {
-            return None;
-        }
-        self.last_drawn_pts_ms.store(frame_ms, Ordering::Relaxed);
-        Some(frame)
+        select_frame(&self.inner, &self.last_drawn_pts_ms, target_secs)
+    }
+
+    /// A handle to the decoder's frame queue, for the SDL window thread to
+    /// select frames from directly (vsync-locked) instead of being fed them.
+    pub fn queue_handle(&self) -> Arc<Mutex<SharedQueue>> {
+        Arc::clone(&self.inner)
     }
 }
 
