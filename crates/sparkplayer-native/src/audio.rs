@@ -5,18 +5,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ffmpeg_next as ffmpeg;
+use ffmpeg::ChannelLayout;
 use ffmpeg::format::sample::{Sample, Type as SampleType};
 use ffmpeg::media::Type as MediaType;
 use ffmpeg::software::resampling::Context as Resampler;
 use ffmpeg::util::frame::audio::Audio;
-use ffmpeg::ChannelLayout;
+use ffmpeg_next as ffmpeg;
 use rodio::source::Source;
 use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate};
 
 use sparkplayer_core::backend::AudioBackend;
 use sparkplayer_core::library;
 use sparkplayer_core::{SampleBuffer, TrackRef};
+
+use crate::shared_audio::SharedAudioWriter;
 
 /// Audio source backed by an ffmpeg input. Used when playing video files
 /// (and also as a generic fallback for audio formats rodio's symphonia layer
@@ -140,17 +142,23 @@ impl FfmpegAudioSource {
 
     fn frame_disposition(&mut self, frame: &Audio) -> FrameDisposition {
         let Some(target) = self.pending_seek_secs else {
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         };
         let Some(pts) = frame.pts() else {
             self.pending_seek_secs = None;
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         };
         let tb_num = self.stream_time_base.numerator() as f64;
         let tb_den = self.stream_time_base.denominator() as f64;
         if tb_den == 0.0 {
             self.pending_seek_secs = None;
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         }
         let frame_pts_secs = pts as f64 * tb_num / tb_den;
         let in_rate = frame.rate() as f64;
@@ -164,7 +172,9 @@ impl FfmpegAudioSource {
         }
         if frame_pts_secs >= target {
             self.pending_seek_secs = None;
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         }
         let skip_per_channel = ((target - frame_pts_secs) * self.out_rate as f64).round() as i64;
         let skip_per_channel = skip_per_channel.max(0) as usize;
@@ -276,15 +286,25 @@ impl Source for FfmpegAudioSource {
 struct TapSource<S> {
     inner: S,
     tap: SampleBuffer,
+    shared_audio: Option<SharedAudioWriter>,
 }
 
 impl<S> TapSource<S>
 where
     S: Source<Item = f32>,
 {
-    fn new(inner: S, tap: SampleBuffer) -> Self {
-        tap.set_format(inner.channels().get(), inner.sample_rate().get());
-        Self { inner, tap }
+    fn new(inner: S, tap: SampleBuffer, shared_audio: Option<SharedAudioWriter>) -> Self {
+        let channels = inner.channels().get();
+        let sample_rate = inner.sample_rate().get();
+        tap.set_format(channels, sample_rate);
+        if let Some(shared) = shared_audio.as_ref() {
+            shared.set_format(channels, sample_rate);
+        }
+        Self {
+            inner,
+            tap,
+            shared_audio,
+        }
     }
 }
 
@@ -296,6 +316,9 @@ where
     fn next(&mut self) -> Option<f32> {
         let v = self.inner.next()?;
         self.tap.push(v);
+        if let Some(shared) = self.shared_audio.as_ref() {
+            shared.push_sample(v);
+        }
         Some(v)
     }
 }
@@ -323,7 +346,8 @@ where
 fn open_input(path: &Path) -> Result<ffmpeg::format::context::Input> {
     ffmpeg::init().ok();
     ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Fatal);
-    ffmpeg::format::input(&path.to_path_buf()).with_context(|| format!("opening {}", path.display()))
+    ffmpeg::format::input(&path.to_path_buf())
+        .with_context(|| format!("opening {}", path.display()))
 }
 
 /// One selectable audio track inside a container, paired with the ffmpeg
@@ -413,6 +437,7 @@ pub struct AudioPlayer {
     pub tap: SampleBuffer,
     volume: f32,
     pub current_path: Option<PathBuf>,
+    shared_audio: Option<SharedAudioWriter>,
     /// Audio tracks of the current file (only populated for video containers).
     audio_tracks: Vec<AudioTrackInfo>,
     /// Index into `audio_tracks` of the track currently being decoded.
@@ -420,7 +445,7 @@ pub struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    pub fn new() -> Result<Self> {
+    pub fn new(shared_audio: Option<SharedAudioWriter>) -> Result<Self> {
         let mut sink = DeviceSinkBuilder::open_default_sink()
             .context("failed to open default audio output")?;
         sink.log_on_drop(false);
@@ -432,6 +457,7 @@ impl AudioPlayer {
             tap,
             volume: 0.8,
             current_path: None,
+            shared_audio,
             audio_tracks: Vec::new(),
             active_audio_track: 0,
         })
@@ -451,6 +477,9 @@ impl AudioPlayer {
         self.player = Player::connect_new(self.sink.mixer());
         self.player.set_volume(self.volume);
         self.tap.reset();
+        if let Some(shared) = self.shared_audio.as_ref() {
+            shared.reset();
+        }
         self.current_path = Some(path.to_path_buf());
         self.audio_tracks.clear();
         self.active_audio_track = 0;
@@ -461,7 +490,7 @@ impl AudioPlayer {
             self.active_audio_track = default_idx;
             let source = self.open_video_audio(path)?;
             let total = source.total_duration();
-            let tapped = TapSource::new(source, self.tap.clone());
+            let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
             self.player.append(tapped);
             total
         } else {
@@ -469,7 +498,7 @@ impl AudioPlayer {
             let source = Decoder::new(BufReader::new(file))
                 .with_context(|| format!("decoding {}", path.display()))?;
             let total = source.total_duration();
-            let tapped = TapSource::new(source, self.tap.clone());
+            let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
             self.player.append(tapped);
             total
         };
@@ -489,7 +518,7 @@ impl AudioPlayer {
         if library::is_video_file(path) {
             let mut source = self.open_video_audio(path)?;
             source.seek(target)?;
-            let tapped = TapSource::new(source, self.tap.clone());
+            let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
             self.player.append(tapped);
         } else {
             let file = File::open(path)?;
@@ -499,13 +528,13 @@ impl AudioPlayer {
             // discards every sample from the start of the file, so the delay
             // grows the further into the track we seek.
             if source.try_seek(target).is_ok() {
-                let tapped = TapSource::new(source, self.tap.clone());
+                let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
                 self.player.append(tapped);
             } else {
                 let file = File::open(path)?;
                 let source = Decoder::new(BufReader::new(file))?;
                 let skipped = source.skip_duration(target);
-                let tapped = TapSource::new(skipped, self.tap.clone());
+                let tapped = TapSource::new(skipped, self.tap.clone(), self.shared_audio.clone());
                 self.player.append(tapped);
             }
         }
@@ -539,7 +568,7 @@ impl AudioPlayer {
 
         let mut source = self.open_video_audio(&path)?;
         source.seek(target)?;
-        let tapped = TapSource::new(source, self.tap.clone());
+        let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
         self.player.append(tapped);
 
         if was_paused {
@@ -592,6 +621,9 @@ impl AudioBackend for AudioPlayer {
     fn stop(&mut self) {
         self.player.stop();
         self.tap.reset();
+        if let Some(shared) = self.shared_audio.as_ref() {
+            shared.reset();
+        }
         self.current_path = None;
     }
 
