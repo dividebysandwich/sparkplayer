@@ -4,6 +4,7 @@ mod external_window;
 mod library_native;
 mod media_controls;
 mod metadata_native;
+mod shared_audio;
 mod subtitles_native;
 mod video;
 
@@ -28,10 +29,11 @@ use sparkplayer_core::{App, ui};
 
 use crate::audio::AudioPlayer;
 use crate::backends::{
-    build_picker, GraphicsChoice, NativeAlbumArt, NativeConfigStore, NativeVideoBackend,
+    GraphicsChoice, NativeAlbumArt, NativeConfigStore, NativeVideoBackend, build_picker,
 };
 use crate::library_native::NativeLibrary;
 use crate::media_controls::{MediaCommand, MediaOs};
+use crate::shared_audio::SharedAudioWriter;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum GraphicsArg {
@@ -85,6 +87,10 @@ struct Cli {
     /// `English`).
     #[arg(long, value_name = "LANG")]
     subtitle_lang: Option<String>,
+
+    /// Shared-memory stream name used to publish decoded audio for Bespoke.
+    #[arg(long, value_name = "NAME", default_value = "/sparkplayer_audio", default_missing_value = "/sparkplayer_audio", num_args = 0..=1)]
+    bespoke_shm: String,
 }
 
 /// Translate a crossterm key into the platform-neutral [`CoreKeyEvent`] the
@@ -152,7 +158,9 @@ fn main() -> Result<()> {
     // escape responses come through stdin without echoing as characters.
     let picker = build_picker(cli.graphics.into());
 
-    let audio = AudioPlayer::new()?;
+    let shared_audio = shared_audio::open(&cli.bespoke_shm)?;
+    let shared_audio_control = shared_audio.clone();
+    let audio = AudioPlayer::new(Some(shared_audio))?;
     let video = NativeVideoBackend::new(picker.clone());
     let art = NativeAlbumArt::new(picker);
 
@@ -203,7 +211,13 @@ fn main() -> Result<()> {
     // it just stays off.
     let mut media = MediaOs::new().ok();
 
-    let res = run_loop(&mut terminal, &mut app, idx_rx, media.as_mut());
+    let res = run_loop(
+        &mut terminal,
+        &mut app,
+        idx_rx,
+        media.as_mut(),
+        Some(shared_audio_control),
+    );
     restore_terminal(&mut terminal).ok();
     app.save_session();
 
@@ -248,6 +262,28 @@ fn apply_media(cmd: MediaCommand, app: &mut App) -> Result<()> {
     Ok(())
 }
 
+fn apply_shared_audio_control(shared: &SharedAudioWriter, app: &mut App) -> Result<()> {
+    let control = shared.poll_control();
+    if let Some(should_play) = control.playback {
+        if should_play && app.audio.is_paused() {
+            app.audio.toggle_pause();
+        } else if !should_play && !app.audio.is_paused() {
+            app.audio.toggle_pause();
+        }
+    }
+
+    if control.visualizer_delta > 0 {
+        for _ in 0..control.visualizer_delta {
+            app.cycle_visualizer();
+        }
+    } else if control.visualizer_delta < 0 {
+        for _ in 0..(-control.visualizer_delta) {
+            app.cycle_visualizer_back();
+        }
+    }
+
+    Ok(())
+}
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -269,6 +305,7 @@ fn run_loop(
     app: &mut App,
     index_rx: Receiver<Vec<Track>>,
     mut media: Option<&mut MediaOs>,
+    shared_audio: Option<SharedAudioWriter>,
 ) -> Result<()> {
     let frame_dur = Duration::from_millis(33);
     let start = Instant::now();
@@ -281,6 +318,10 @@ fn run_loop(
         // Adopt the library index once the background scan reports in.
         if let Ok(tracks) = index_rx.try_recv() {
             app.set_search_index(tracks);
+        }
+
+        if let Some(shared) = shared_audio.as_ref() {
+            apply_shared_audio_control(shared, app)?;
         }
 
         // Apply any OS media-control requests (media keys, desktop widget).
