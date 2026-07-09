@@ -24,7 +24,16 @@ image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install --assume-yes libc6-dev:$CROSS_DEB_ARCH linux-libc-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH libsdl2-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev"
+    "apt-get install --assume-yes libc6-dev:$CROSS_DEB_ARCH linux-libc-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libavcodec-dev:$CROSS_DEB_ARCH libavformat-dev:$CROSS_DEB_ARCH libavutil-dev:$CROSS_DEB_ARCH libswresample-dev:$CROSS_DEB_ARCH libswscale-dev:$CROSS_DEB_ARCH libsdl2-dev:$CROSS_DEB_ARCH pkg-config clang libclang-dev",
+    # ffmpeg-sys-next compiles a small `check.c` with the HOST (x86_64) compiler,
+    # but pkg-config injects -I/usr/include/aarch64-linux-gnu from FFmpeg's
+    # Cflags. Recent glibc made the arm64 <bits/math-vector.h> declare
+    # aarch64-only GCC vector types (__Float32x4_t, SVE __SVFloat32_t, ...) that
+    # the x86_64 compiler can't parse, so that host compile fails. The header
+    # only provides *optional* vectorized libm variants; replace it with the
+    # generic no-SIMD stub (empty __DECL_SIMD_* macros) so both the host check
+    # and the real aarch64 build compile. `math.h` still works unchanged.
+    "echo '#include <bits/libm-simd-decl-stubs.h>' > /usr/include/aarch64-linux-gnu/bits/math-vector.h"
 ]
 
 [target.armv7-unknown-linux-gnueabihf]

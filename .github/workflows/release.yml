@@ -165,16 +165,27 @@ jobs:
       - name: Install FFmpeg (shared dev build)
         shell: pwsh
         run: |
-          # Prebuilt FFmpeg shared dev build from gyan.dev (LGPL).
+          # Prebuilt FFmpeg shared build from gyan.dev.
           # ffmpeg-sys-next looks for $FFMPEG_DIR/include and $FFMPEG_DIR/lib.
-          # Pinned to a specific version so the soname-versioned DLL names
-          # (avcodec-62.dll, avutil-60.dll, ...) are deterministic and match
-          # the names hard-coded in wix/main.wxs. Bumping this requires
-          # updating those names in the WiX source too.
-          $url = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.1-full_build-shared.7z'
+          # Use the stable "latest release" URL, NOT a version-pinned one: gyan.dev
+          # prunes old versioned packages from /packages/ on every release, which
+          # repeatedly 404s this step. The soname-versioned DLL names
+          # (avcodec-62.dll, avutil-60.dll, ...) are stable within an FFmpeg major
+          # series and are hard-coded in wix/main.wxs; a major bump changes them,
+          # and the check below fails loudly with the actual names when it does.
+          $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z'
           Invoke-WebRequest -Uri $url -OutFile ffmpeg.7z -UseBasicParsing
           7z x ffmpeg.7z -offmpeg-dist -y | Out-Null
           $root = (Get-ChildItem ffmpeg-dist -Directory | Select-Object -First 1).FullName
+          # Fail early (with the actual names) if the DLL sonames drift from what
+          # wix/main.wxs bundles, rather than a cryptic failure at the MSI step.
+          $expected = 'avcodec-62.dll','avformat-62.dll','avutil-60.dll','swresample-6.dll','swscale-9.dll'
+          $have = (Get-ChildItem "$root\bin" -Filter *.dll).Name
+          $missing = $expected | Where-Object { $_ -notin $have }
+          if ($missing) {
+            Write-Host "FFmpeg DLLs present in bin:`n  $($have -join "`n  ")"
+            throw "FFmpeg DLL soname mismatch (missing: $($missing -join ', ')). Update wix/main.wxs to match the names above."
+          }
           echo "FFMPEG_DIR=$root" >> $env:GITHUB_ENV
           # libclang is needed by bindgen (used by ffmpeg-sys-next).
           # GitHub's windows-latest image ships LLVM under C:\Program Files\LLVM.
