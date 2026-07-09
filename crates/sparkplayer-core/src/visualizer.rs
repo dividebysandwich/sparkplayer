@@ -22,11 +22,16 @@ const WAVE_SIZE: usize = 2048;
 /// (height, newest on top). Scaled to the panel by the graphics backend.
 const WATERFALL_BINS: usize = 256;
 const WATERFALL_ROWS: usize = 192;
-/// Seconds between scroll rows — decouples the scroll speed from the (variable)
-/// redraw rate so the waterfall advances at a steady ~30 rows/s.
-const WATERFALL_ROW_DT: f64 = 1.0 / 30.0;
 const WATERFALL_DB_FLOOR: f32 = -72.0;
 const WATERFALL_DB_RANGE: f32 = 70.0;
+
+/// Scroll rate (new rows/columns per second) shared by the time-frequency
+/// visualizers (waterfall, text waterfall, spectrogram, 3D spectrum). Applied
+/// as a wall-clock gate so the scroll is smooth and independent of the redraw
+/// rate. User-tunable from the settings dialog.
+pub const SCROLL_SPEED_DEFAULT: u32 = 30;
+/// Selectable scroll speeds for the settings dialog (rows/columns per second).
+pub const SCROLL_SPEEDS: &[u32] = &[8, 15, 30, 45, 60];
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum VisMode {
@@ -37,6 +42,7 @@ pub enum VisMode {
     ScrollingWaveform,
     Spectrogram,
     Waterfall,
+    WaterfallText,
     Lissajous,
     Vu,
     Spectrum3D,
@@ -54,6 +60,7 @@ impl VisMode {
             VisMode::ScrollingWaveform => "Scrolling Wave",
             VisMode::Spectrogram => "Spectrogram",
             VisMode::Waterfall => "Waterfall",
+            VisMode::WaterfallText => "Waterfall (Text)",
             VisMode::Lissajous => "Stereo X/Y",
             VisMode::Vu => "VU Meters",
             VisMode::Spectrum3D => "Spectrum 3D",
@@ -69,7 +76,8 @@ impl VisMode {
             VisMode::Waveform => VisMode::ScrollingWaveform,
             VisMode::ScrollingWaveform => VisMode::Spectrogram,
             VisMode::Spectrogram => VisMode::Waterfall,
-            VisMode::Waterfall => VisMode::Lissajous,
+            VisMode::Waterfall => VisMode::WaterfallText,
+            VisMode::WaterfallText => VisMode::Lissajous,
             VisMode::Lissajous => VisMode::Vu,
             VisMode::Vu => VisMode::Spectrum3D,
             VisMode::Spectrum3D => VisMode::Plasma,
@@ -86,7 +94,8 @@ impl VisMode {
             VisMode::ScrollingWaveform => VisMode::Waveform,
             VisMode::Spectrogram => VisMode::ScrollingWaveform,
             VisMode::Waterfall => VisMode::Spectrogram,
-            VisMode::Lissajous => VisMode::Waterfall,
+            VisMode::WaterfallText => VisMode::Waterfall,
+            VisMode::Lissajous => VisMode::WaterfallText,
             VisMode::Vu => VisMode::Lissajous,
             VisMode::Spectrum3D => VisMode::Vu,
             VisMode::Plasma => VisMode::Spectrum3D,
@@ -103,6 +112,7 @@ impl VisMode {
             VisMode::ScrollingWaveform => "scrolling-wave",
             VisMode::Spectrogram => "spectrogram",
             VisMode::Waterfall => "waterfall",
+            VisMode::WaterfallText => "waterfall-text",
             VisMode::Lissajous => "lissajous",
             VisMode::Vu => "vu",
             VisMode::Spectrum3D => "spectrum-3d",
@@ -119,6 +129,7 @@ impl VisMode {
             "scrolling-wave" => VisMode::ScrollingWaveform,
             "spectrogram" => VisMode::Spectrogram,
             "waterfall" => VisMode::Waterfall,
+            "waterfall-text" => VisMode::WaterfallText,
             "lissajous" => VisMode::Lissajous,
             "vu" => VisMode::Vu,
             "spectrum-3d" => VisMode::Spectrum3D,
@@ -141,6 +152,11 @@ pub struct Visualizer {
     smoothed_bars: Vec<f32>,
     pub scroll_wave: VecDeque<f32>,
     pub spectrogram_cols: VecDeque<Vec<f32>>,
+    /// New rows/columns per second for the scrolling FFT views; gated on the
+    /// wall clock via the `*_last_secs` watermarks below.
+    scroll_speed: u32,
+    spectrogram_last_secs: Option<f64>,
+    spectrum_3d_last_secs: Option<f64>,
     /// Time-ordered magnitude rows for the waterfall (oldest front, newest
     /// back), the RGB image built from them, and the clock of the last row.
     waterfall_rows: VecDeque<Vec<f32>>,
@@ -239,6 +255,15 @@ pub fn clamp_fft_size(size: usize) -> usize {
     p
 }
 
+/// Snap a requested scroll speed to the nearest supported value.
+pub fn clamp_scroll_speed(speed: u32) -> u32 {
+    SCROLL_SPEEDS
+        .iter()
+        .copied()
+        .min_by_key(|&s| s.abs_diff(speed))
+        .unwrap_or(SCROLL_SPEED_DEFAULT)
+}
+
 /// Map a normalized magnitude (0..1) to the classic SDR waterfall gradient:
 /// dark blue → blue → cyan → green → yellow → orange → red → white.
 pub(crate) fn waterfall_color(t: f32) -> (u8, u8, u8) {
@@ -282,6 +307,9 @@ impl Visualizer {
             smoothed_bars: Vec::new(),
             scroll_wave: VecDeque::new(),
             spectrogram_cols: VecDeque::new(),
+            scroll_speed: SCROLL_SPEED_DEFAULT,
+            spectrogram_last_secs: None,
+            spectrum_3d_last_secs: None,
             waterfall_rows: VecDeque::new(),
             waterfall_img: vec![0; WATERFALL_BINS * WATERFALL_ROWS * 3],
             waterfall_last_secs: None,
@@ -326,6 +354,51 @@ impl Visualizer {
         }
         self.spectrum_buf = vec![Complex32::new(0.0, 0.0); size];
         self.mags = vec![0.0; size / 2];
+    }
+
+    /// The active scroll speed (rows/columns per second) of the time-frequency
+    /// visualizers.
+    pub fn scroll_speed(&self) -> u32 {
+        self.scroll_speed
+    }
+
+    /// Set the scroll speed (snapped to a supported value).
+    pub fn set_scroll_speed(&mut self, speed: u32) {
+        self.scroll_speed = clamp_scroll_speed(speed);
+    }
+
+    /// How many scroll steps have elapsed since `*watermark` at the current
+    /// scroll rate, advancing the watermark. Caps the burst (`max`) so a long
+    /// stall or clock jump can't dump a screenful at once, and re-seeds on the
+    /// first tick and while paused so the timeline doesn't lurch on resume.
+    fn scroll_steps(
+        watermark: &mut Option<f64>,
+        scroll_dt: f64,
+        active: bool,
+        now_secs: f64,
+        max: usize,
+    ) -> usize {
+        let last = match *watermark {
+            Some(last) if active => last,
+            _ => {
+                *watermark = Some(now_secs);
+                return 0;
+            }
+        };
+        let dt = scroll_dt.max(1.0e-3);
+        let mut t = last;
+        let mut steps = 0;
+        while now_secs - t >= dt && steps < max {
+            t += dt;
+            steps += 1;
+        }
+        *watermark = Some(if steps == max { now_secs } else { t });
+        steps
+    }
+
+    /// Seconds between scroll steps at the current scroll speed.
+    fn scroll_dt(&self) -> f64 {
+        1.0 / self.scroll_speed.max(1) as f64
     }
 
     /// Seconds of audio played since `watermark` was last updated, syncing the
@@ -528,14 +601,17 @@ impl Visualizer {
         height: usize,
         sample_rate: u32,
         active: bool,
+        now_secs: f64,
     ) -> Vec<Vec<f32>> {
-        if active {
+        let cap = width.max(2);
+        let dt = self.scroll_dt();
+        let steps = Self::scroll_steps(&mut self.spectrogram_last_secs, dt, active, now_secs, cap);
+        for _ in 0..steps {
             self.compute_fft(tap);
             // Slightly tighter dynamic range than the bars so colors saturate nicely.
             let col = self.log_bin_db(height, sample_rate, -70.0, 65.0);
             self.spectrogram_cols.push_back(col);
         }
-        let cap = width.max(2);
         while self.spectrogram_cols.len() > cap {
             self.spectrogram_cols.pop_front();
         }
@@ -547,6 +623,37 @@ impl Visualizer {
     /// RGB image. Returns the image dimensions `(width, height)` in pixels; the
     /// pixels themselves are read via [`Self::waterfall_pixels`]. `now_secs` is
     /// the platform wall clock.
+    /// Append fresh FFT rows to the waterfall history for the real time elapsed
+    /// since the last one (steady ~30 rows/s, independent of redraw rate).
+    /// Shared by the graphical waterfall and the text waterfall.
+    pub fn waterfall_advance(
+        &mut self,
+        tap: &SampleBuffer,
+        sample_rate: u32,
+        active: bool,
+        now_secs: f64,
+    ) {
+        let dt = self.scroll_dt();
+        let steps =
+            Self::scroll_steps(&mut self.waterfall_last_secs, dt, active, now_secs, WATERFALL_ROWS);
+        for _ in 0..steps {
+            self.compute_fft(tap);
+            let row = self.log_bin_db(
+                WATERFALL_BINS,
+                sample_rate,
+                WATERFALL_DB_FLOOR,
+                WATERFALL_DB_RANGE,
+            );
+            self.waterfall_rows.push_back(row);
+        }
+        while self.waterfall_rows.len() > WATERFALL_ROWS {
+            self.waterfall_rows.pop_front();
+        }
+    }
+
+    /// Advance the waterfall and rebuild its RGB image. Returns the image
+    /// dimensions `(width, height)` in pixels; read the pixels via
+    /// [`Self::waterfall_pixels`].
     pub fn waterfall(
         &mut self,
         tap: &SampleBuffer,
@@ -554,34 +661,7 @@ impl Visualizer {
         active: bool,
         now_secs: f64,
     ) -> (u32, u32) {
-        match self.waterfall_last_secs {
-            None => self.waterfall_last_secs = Some(now_secs),
-            Some(last) if active => {
-                // Add one row per elapsed WATERFALL_ROW_DT, capped so a long
-                // stall (or a clock jump) can't spew a huge burst of rows.
-                let mut t = last;
-                let mut added = 0;
-                while now_secs - t >= WATERFALL_ROW_DT && added < WATERFALL_ROWS {
-                    self.compute_fft(tap);
-                    let row = self.log_bin_db(
-                        WATERFALL_BINS,
-                        sample_rate,
-                        WATERFALL_DB_FLOOR,
-                        WATERFALL_DB_RANGE,
-                    );
-                    self.waterfall_rows.push_back(row);
-                    t += WATERFALL_ROW_DT;
-                    added += 1;
-                }
-                // If we fell far behind, resync rather than chase forever.
-                self.waterfall_last_secs = Some(if added == WATERFALL_ROWS { now_secs } else { t });
-                while self.waterfall_rows.len() > WATERFALL_ROWS {
-                    self.waterfall_rows.pop_front();
-                }
-            }
-            // Paused: hold the timeline so it doesn't lurch on resume.
-            Some(_) => self.waterfall_last_secs = Some(now_secs),
-        }
+        self.waterfall_advance(tap, sample_rate, active, now_secs);
         self.rebuild_waterfall_image();
         (WATERFALL_BINS as u32, WATERFALL_ROWS as u32)
     }
@@ -591,8 +671,7 @@ impl Visualizer {
         &self.waterfall_img
     }
 
-    /// The raw magnitude rows (oldest first), for the cell-based fallback used
-    /// on terminals without pixel graphics.
+    /// The raw magnitude rows (oldest first), for the cell-based waterfalls.
     pub fn waterfall_rows(&self) -> &VecDeque<Vec<f32>> {
         &self.waterfall_rows
     }
@@ -649,13 +728,16 @@ impl Visualizer {
         sample_rate: u32,
         depth: usize,
         active: bool,
+        now_secs: f64,
     ) -> Vec<Vec<f32>> {
-        if active {
+        let cap = depth.max(2);
+        let dt = self.scroll_dt();
+        let steps = Self::scroll_steps(&mut self.spectrum_3d_last_secs, dt, active, now_secs, cap);
+        for _ in 0..steps {
             self.compute_fft(tap);
             let col = self.log_bin_db(bins, sample_rate, -75.0, 70.0);
             self.spectrum_3d_rows.push_back(col);
         }
-        let cap = depth.max(2);
         while self.spectrum_3d_rows.len() > cap {
             self.spectrum_3d_rows.pop_front();
         }

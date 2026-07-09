@@ -92,6 +92,7 @@ pub enum EscapeMenuKind {
     AvOffset,
     Visualizer,
     FftSize,
+    ScrollSpeed,
     Theme,
     Fullscreen,
     VideoWindow,
@@ -359,6 +360,7 @@ impl App {
             visualizer.mode = mode;
         }
         visualizer.set_fft_size(cfg.fft_size);
+        visualizer.set_scroll_speed(cfg.scroll_speed);
         let theme = theme::by_name(&cfg.theme);
         theme::set_current(theme);
         let mut playlist_state = ListState::default();
@@ -1073,6 +1075,7 @@ impl App {
             volume: self.audio.volume(),
             visualizer: self.visualizer.mode.name().to_string(),
             fft_size: self.visualizer.fft_size(),
+            scroll_speed: self.visualizer.scroll_speed(),
             last_dir: Some(self.browser_dir.to_string_lossy().to_string()),
             repeat: self.repeat.label().to_ascii_lowercase(),
             shuffle: self.shuffle,
@@ -1268,6 +1271,19 @@ impl App {
         self.visualizer.set_fft_size(size);
         let hz = self.audio.tap().sample_rate() as f64 / size as f64;
         self.status = format!("FFT window: {size} samples ({hz:.1} Hz/bin)");
+        self.save_config();
+    }
+
+    /// Step the scrolling FFT visualizers' scroll speed to the next/previous
+    /// supported value (rows/columns per second).
+    pub fn step_scroll_speed(&mut self, delta: i32) {
+        let speeds = crate::visualizer::SCROLL_SPEEDS;
+        let cur = self.visualizer.scroll_speed();
+        let pos = speeds.iter().position(|&s| s == cur).unwrap_or(0) as i32;
+        let next = (pos + delta).clamp(0, speeds.len() as i32 - 1) as usize;
+        let speed = speeds[next];
+        self.visualizer.set_scroll_speed(speed);
+        self.status = format!("Scroll speed: {speed} rows/s");
         self.save_config();
     }
 
@@ -1477,6 +1493,12 @@ impl App {
                 value: format!("{} samples", self.visualizer.fft_size()),
             },
             EscapeMenuItem {
+                kind: EscapeMenuKind::ScrollSpeed,
+                enabled: true,
+                label: "Scroll Speed",
+                value: format!("{} rows/s", self.visualizer.scroll_speed()),
+            },
+            EscapeMenuItem {
                 kind: EscapeMenuKind::Theme,
                 enabled: true,
                 label: "Theme",
@@ -1597,6 +1619,7 @@ impl App {
                 }
             }
             EscapeMenuKind::FftSize => self.step_fft_size(delta),
+            EscapeMenuKind::ScrollSpeed => self.step_scroll_speed(delta),
             EscapeMenuKind::Theme => {
                 if delta > 0 {
                     self.cycle_theme();

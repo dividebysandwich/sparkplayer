@@ -50,6 +50,7 @@ pub(super) fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
         VisMode::ScrollingWaveform => draw_scrolling_waveform(frame, inner, app, active),
         VisMode::Spectrogram => draw_spectrogram(frame, inner, app, active),
         VisMode::Waterfall => draw_waterfall(frame, inner, app, active),
+        VisMode::WaterfallText => draw_waterfall_text(frame, inner, app, active),
         VisMode::Lissajous => draw_lissajous(frame, inner, app, active),
         VisMode::Vu => draw_vu(frame, inner, app, active),
         VisMode::Spectrum3D => draw_spectrum_3d(frame, inner, app, active),
@@ -611,7 +612,9 @@ fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
     let half = app.truecolor;
     let bins = if half { h * 2 } else { h };
     let sr = app.audio.tap().sample_rate();
-    let cols = app.visualizer.spectrogram(app.audio.tap(), w, bins, sr, active);
+    let cols = app
+        .visualizer
+        .spectrogram(app.audio.tap(), w, bins, sr, active, app.clock_secs);
     let buf = frame.buffer_mut();
     let n_cols = cols.len();
     let start_x = (area.width as usize).saturating_sub(n_cols);
@@ -700,6 +703,64 @@ fn draw_waterfall_cells(frame: &mut Frame, area: Rect, app: &App) {
                 cell.set_char('▀');
                 cell.set_fg(rgb(sample(cy * 2, cx))); // upper half = newer
                 cell.set_bg(rgb(sample(cy * 2 + 1, cx)));
+            } else {
+                cell.set_char(' ');
+                cell.set_bg(rgb(sample(cy, cx)));
+            }
+        }
+    }
+}
+
+/// Text version of the waterfall: the same vertically-scrolling FFT view (time
+/// down, frequency across, newest on top) and color ramp, drawn entirely with
+/// cells so it works on any terminal. On truecolor terminals it packs two
+/// frequency sub-columns into each cell with a `▐` right-half block (left half
+/// = background = lower bin, right half = foreground = upper bin), doubling the
+/// horizontal frequency resolution; otherwise one bin fills each cell.
+fn draw_waterfall_text(frame: &mut Frame, area: Rect, app: &mut App, active: bool) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let sr = app.audio.tap().sample_rate();
+    app.visualizer
+        .waterfall_advance(app.audio.tap(), sr, active, app.clock_secs);
+
+    let rows = app.visualizer.waterfall_rows();
+    let n = rows.len();
+    let w = area.width as usize;
+    let h = area.height as usize;
+    let split = app.truecolor;
+    // With `▐`, each cell holds two sub-columns, so the frequency axis spans
+    // `2 * w` sub-columns instead of `w`.
+    let sub_cols = if split { w * 2 } else { w };
+    // Magnitude at time-step `cy` back from newest, frequency sub-column `s`.
+    let sample = |cy: usize, s: usize| -> f32 {
+        if cy >= n {
+            return 0.0;
+        }
+        let row = &rows[n - 1 - cy];
+        if row.is_empty() {
+            return 0.0;
+        }
+        let bin = (s * row.len() / sub_cols.max(1)).min(row.len() - 1);
+        row[bin]
+    };
+    let rgb = |m: f32| {
+        let (r, g, b) = waterfall_color(m);
+        Color::Rgb(r, g, b)
+    };
+    let buf = frame.buffer_mut();
+    for cy in 0..h {
+        let y = area.y + cy as u16;
+        for cx in 0..w {
+            let x = area.x + cx as u16;
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
+            if split {
+                cell.set_char('▐');
+                cell.set_bg(rgb(sample(cy, cx * 2))); // left half = lower freq
+                cell.set_fg(rgb(sample(cy, cx * 2 + 1))); // right half = higher freq
             } else {
                 cell.set_char(' ');
                 cell.set_bg(rgb(sample(cy, cx)));
@@ -811,7 +872,9 @@ fn draw_spectrum_3d(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
     // of overlapping silhouettes.
     let depth_rows = (h.saturating_mul(2)).clamp(18, 40);
     let sr = app.audio.tap().sample_rate();
-    let rows = app.visualizer.spectrum_3d(app.audio.tap(), bins, sr, depth_rows, active);
+    let rows = app
+        .visualizer
+        .spectrum_3d(app.audio.tap(), bins, sr, depth_rows, active, app.clock_secs);
     if rows.is_empty() {
         return;
     }
