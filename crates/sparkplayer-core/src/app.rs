@@ -7,7 +7,8 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
 use crate::backend::{
-    AlbumArtRenderer, AudioBackend, ConfigStore, CoreKey, CoreKeyEvent, MediaLibrary, VideoBackend,
+    AlbumArtRenderer, AudioBackend, ConfigStore, CoreKey, CoreKeyEvent, CoreMouseEvent,
+    CoreMouseKind, MediaLibrary, VideoBackend,
 };
 use crate::config::Config;
 use crate::library::{self, Track, TrackRef};
@@ -55,6 +56,22 @@ fn baseline_av_offset(audio_lat_secs: f64) -> f64 {
 pub enum FocusPane {
     Playlist,
     Browser,
+}
+
+/// A clickable playback control in the "Now Playing" badge row. The UI records
+/// each badge's on-screen rect during draw (into `App::control_hits`) so
+/// `handle_mouse` can map a click back to the action.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum MouseControl {
+    /// Transport buttons (cassette-deck style).
+    SeekBack,
+    Stop,
+    PlayPause,
+    SeekForward,
+    CycleRepeat,
+    ToggleShuffle,
+    ToggleFavorite,
+    CycleSubtitle,
 }
 
 /// Whether the app is capturing typed text, and for what. In `Filter` mode
@@ -300,6 +317,18 @@ pub struct App {
     pub last_video_rect: Option<Rect>,
     pub last_art_rect: Option<Rect>,
     pub last_browser_rect: Option<Rect>,
+
+    /// Mouse hit-test rects, recorded each `ui::draw` and consumed by
+    /// `handle_mouse`. The inner (bordered) content rects of the two lists, the
+    /// progress/seek bar, the visualizer, and each clickable control badge.
+    pub playlist_hit: Option<Rect>,
+    pub browser_hit: Option<Rect>,
+    pub progress_hit: Option<Rect>,
+    pub visualizer_hit: Option<Rect>,
+    pub volume_hit: Option<Rect>,
+    pub control_hits: Vec<(Rect, MouseControl)>,
+    /// Last list click (pane, full index, `clock_secs`) for double-click detection.
+    last_click: Option<(FocusPane, usize, f64)>,
 }
 
 impl App {
@@ -394,6 +423,13 @@ impl App {
             last_video_rect: None,
             last_art_rect: None,
             last_browser_rect: None,
+            playlist_hit: None,
+            browser_hit: None,
+            progress_hit: None,
+            visualizer_hit: None,
+            volume_hit: None,
+            control_hits: Vec::new(),
+            last_click: None,
         };
         app.refresh_browser();
         app
@@ -1766,6 +1802,215 @@ impl App {
         self.pending_url_open.take()
     }
 
+    /// Seek to `frac` (0..1) of the current track's duration, absolute.
+    pub fn seek_to_fraction(&mut self, frac: f64) {
+        let Some(dur) = self.current_duration else {
+            return;
+        };
+        if self.playing_index.is_none() {
+            return;
+        }
+        let target = frac.clamp(0.0, 1.0) * dur.as_secs_f64();
+        let cur = self.position().as_secs_f64();
+        self.seek_seconds(target - cur);
+    }
+
+    /// Dispatch a platform-neutral mouse event. Hit-tests against the rects the
+    /// UI recorded during the last draw. Native only for now (the web build
+    /// uses native DOM controls); harmless if the rects are unset.
+    pub fn handle_mouse(&mut self, ev: CoreMouseEvent) -> Result<()> {
+        // Modal overlays and text entry own the screen — ignore the mouse.
+        if self.show_help
+            || self.show_escape_menu
+            || self.show_search
+            || self.input_mode != InputMode::Normal
+        {
+            return Ok(());
+        }
+        let (col, row) = (ev.col, ev.row);
+        match ev.kind {
+            CoreMouseKind::ScrollUp | CoreMouseKind::ScrollDown => {
+                let delta = if ev.kind == CoreMouseKind::ScrollUp { -3 } else { 3 };
+                if rect_hit(self.playlist_hit, col, row) {
+                    self.scroll_pane(FocusPane::Playlist, delta);
+                } else if rect_hit(self.browser_hit, col, row) {
+                    self.scroll_pane(FocusPane::Browser, delta);
+                } else if rect_hit(self.visualizer_hit, col, row) {
+                    // Scrolling over the visualizer nudges the volume.
+                    self.volume_step(if delta < 0 { 0.05 } else { -0.05 });
+                }
+            }
+            CoreMouseKind::Down => {
+                // Seek bar takes priority (it can overlap the now-playing panel).
+                if rect_hit(self.progress_hit, col, row) {
+                    self.seek_to_fraction(self.frac_at(self.progress_hit, col));
+                    return Ok(());
+                }
+                // Clickable control badges.
+                let mut control = None;
+                for (r, c) in &self.control_hits {
+                    if rect_hit(Some(*r), col, row) {
+                        control = Some(*c);
+                        break;
+                    }
+                }
+                if let Some(c) = control {
+                    self.apply_mouse_control(c)?;
+                    return Ok(());
+                }
+                // Volume column: set level from the click height.
+                if let Some(r) = self.volume_hit.filter(|r| rect_hit(Some(*r), col, row)) {
+                    self.set_volume_abs(self.volume_at_row(r, row), true);
+                    return Ok(());
+                }
+                // Clicking the visualizer switches to the next mode.
+                if rect_hit(self.visualizer_hit, col, row) {
+                    self.cycle_visualizer();
+                    return Ok(());
+                }
+                if let Some(r) = self.playlist_hit.filter(|r| rect_hit(Some(*r), col, row)) {
+                    self.click_list(FocusPane::Playlist, r, row)?;
+                    return Ok(());
+                }
+                if let Some(r) = self.browser_hit.filter(|r| rect_hit(Some(*r), col, row)) {
+                    self.click_list(FocusPane::Browser, r, row)?;
+                }
+            }
+            CoreMouseKind::Drag => {
+                // Dragging in the volume column tracks the level (column-gated,
+                // so it never collides with the seek bar's row-gated scrub).
+                if let Some(r) = self
+                    .volume_hit
+                    .filter(|r| col >= r.x && col < r.x.saturating_add(r.width))
+                {
+                    self.set_volume_abs(self.volume_at_row(r, row), false);
+                    return Ok(());
+                }
+                // Scrub the seek bar: accept any drag on the bar's row(s).
+                if let Some(r) = self
+                    .progress_hit
+                    .filter(|r| row >= r.y && row < r.y.saturating_add(r.height.max(1)))
+                {
+                    self.seek_to_fraction(self.frac_at(Some(r), col));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fraction (0..1) of a horizontal rect that `col` lands at, clamped.
+    fn frac_at(&self, rect: Option<Rect>, col: u16) -> f64 {
+        let Some(r) = rect else { return 0.0 };
+        if r.width == 0 {
+            return 0.0;
+        }
+        let cx = col.clamp(r.x, r.x + r.width - 1);
+        (cx - r.x) as f64 / r.width as f64
+    }
+
+    /// Move a pane's selection by `delta` visible rows, clamped (no wrap), for
+    /// the scroll wheel. Leaves focus untouched so scrolling doesn't steal it.
+    fn scroll_pane(&mut self, pane: FocusPane, delta: i32) {
+        let vis = self.visible_indices(pane);
+        if vis.is_empty() {
+            return;
+        }
+        let cur = self.selection(pane);
+        let pos = vis.iter().position(|&i| i == cur).unwrap_or(0) as i32;
+        let new_pos = (pos + delta).clamp(0, vis.len() as i32 - 1) as usize;
+        self.set_selection(pane, vis[new_pos]);
+    }
+
+    /// Handle a click on a list row: focus the pane and select the row; a
+    /// second click on the same row within the double-click window activates it
+    /// (play the track / enter the directory).
+    fn click_list(&mut self, pane: FocusPane, inner: Rect, row: u16) -> Result<()> {
+        let vis = self.visible_indices(pane);
+        if vis.is_empty() {
+            self.focus = pane;
+            return Ok(());
+        }
+        let offset = match pane {
+            FocusPane::Playlist => self.playlist_state.offset(),
+            FocusPane::Browser => self.browser_state.offset(),
+        };
+        let vis_idx = offset + (row - inner.y) as usize;
+        self.focus = pane;
+        let Some(&full_idx) = vis.get(vis_idx) else {
+            return Ok(()); // click below the last row
+        };
+        self.set_selection(pane, full_idx);
+        let now = self.clock_secs;
+        let double = matches!(
+            self.last_click,
+            Some((p, i, t)) if p == pane && i == full_idx && now - t < 0.45
+        );
+        if double {
+            self.last_click = None;
+            self.activate_selection()?;
+        } else {
+            self.last_click = Some((pane, full_idx, now));
+        }
+        Ok(())
+    }
+
+    /// Volume (0..1.5) for a click at `row` in the vertical volume bar `r`:
+    /// top of the bar is full, bottom is muted.
+    fn volume_at_row(&self, r: Rect, row: u16) -> f32 {
+        if r.height <= 1 {
+            return self.audio.volume();
+        }
+        let ry = row.clamp(r.y, r.y + r.height - 1);
+        let frac_from_top = (ry - r.y) as f32 / (r.height - 1) as f32;
+        ((1.0 - frac_from_top) * 1.5).clamp(0.0, 1.5)
+    }
+
+    /// Set the volume to an absolute level. `persist` writes the config (used on
+    /// the initial click, but skipped mid-drag to avoid thrashing the file).
+    fn set_volume_abs(&mut self, v: f32, persist: bool) {
+        let v = v.clamp(0.0, 1.5);
+        self.audio.set_volume(v);
+        self.status = format!("Volume: {:>3.0}%", v * 100.0);
+        if persist {
+            self.save_config();
+        }
+    }
+
+    fn apply_mouse_control(&mut self, control: MouseControl) -> Result<()> {
+        match control {
+            MouseControl::SeekBack => self.seek_seconds(-10.0),
+            MouseControl::Stop => self.stop_playback(),
+            MouseControl::PlayPause => {
+                // Cassette Play: resume/pause, or start the selection if stopped.
+                if self.playing_index.is_none() {
+                    if !self.tracks.is_empty() {
+                        self.play_index(self.selected)?;
+                    }
+                } else {
+                    self.audio.toggle_pause();
+                }
+            }
+            MouseControl::SeekForward => self.seek_seconds(10.0),
+            MouseControl::CycleRepeat => self.cycle_repeat(),
+            MouseControl::ToggleShuffle => self.toggle_shuffle(),
+            MouseControl::ToggleFavorite => self.toggle_favorite(),
+            MouseControl::CycleSubtitle => self.cycle_subtitle_track(),
+        }
+        Ok(())
+    }
+
+    /// Stop playback: halt audio and any video, and clear the "now playing"
+    /// state (the selection is kept, so the Play button restarts from it).
+    pub fn stop_playback(&mut self) {
+        self.audio.stop();
+        self.playing_index = None;
+        self.playing_track = None;
+        if self.video.is_loaded() {
+            self.video.close();
+        }
+        self.status = String::from("Stopped");
+    }
+
     /// Dispatch a platform-neutral key event. Shared by both builds so the
     /// keymap stays identical.
     pub fn handle_key(&mut self, ev: CoreKeyEvent) -> Result<()> {
@@ -1927,6 +2172,17 @@ impl App {
 fn fmt_short(d: Duration) -> String {
     let s = d.as_secs();
     format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// Whether the cell `(col, row)` falls inside `rect` (if set).
+fn rect_hit(rect: Option<Rect>, col: u16, row: u16) -> bool {
+    match rect {
+        Some(r) => {
+            col >= r.x && col < r.x.saturating_add(r.width) && row >= r.y
+                && row < r.y.saturating_add(r.height)
+        }
+        None => false,
+    }
 }
 
 fn plural_s(n: usize) -> &'static str {

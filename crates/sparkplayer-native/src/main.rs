@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -22,7 +25,9 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use sparkplayer_core::backend::{ConfigStore, CoreKey, CoreKeyEvent};
+use sparkplayer_core::backend::{
+    ConfigStore, CoreKey, CoreKeyEvent, CoreMouseEvent, CoreMouseKind,
+};
 use sparkplayer_core::library::Track;
 use sparkplayer_core::{App, ui};
 
@@ -251,7 +256,7 @@ fn apply_media(cmd: MediaCommand, app: &mut App) -> Result<()> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -259,9 +264,30 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Translate a crossterm mouse event into the platform-neutral core event. Only
+/// left-button press/drag and the scroll wheel drive UI; other kinds are None.
+fn map_mouse(me: MouseEvent) -> Option<CoreMouseEvent> {
+    let kind = match me.kind {
+        MouseEventKind::Down(MouseButton::Left) => CoreMouseKind::Down,
+        MouseEventKind::Drag(MouseButton::Left) => CoreMouseKind::Drag,
+        MouseEventKind::ScrollUp => CoreMouseKind::ScrollUp,
+        MouseEventKind::ScrollDown => CoreMouseKind::ScrollDown,
+        _ => return None,
+    };
+    Some(CoreMouseEvent {
+        kind,
+        col: me.column,
+        row: me.row,
+    })
 }
 
 fn run_loop(
@@ -270,13 +296,23 @@ fn run_loop(
     index_rx: Receiver<Vec<Track>>,
     mut media: Option<&mut MediaOs>,
 ) -> Result<()> {
-    let frame_dur = Duration::from_millis(33);
+    // Redraw at ~60 fps for smooth visualizers; run the heavier video/advance
+    // tick at ~30 fps. Crucially the event-poll timeout below is driven by the
+    // *draw* deadline, so idle frames are evenly spaced regardless of input —
+    // otherwise the redraw gate fires out of phase with the wake schedule and
+    // only looks smooth while a stream of mouse events keeps the loop spinning.
+    let draw_dur = Duration::from_millis(16);
+    let tick_dur = Duration::from_millis(33);
     let start = Instant::now();
     let mut last_tick = Instant::now();
+    let mut last_draw = Instant::now();
 
     loop {
         app.set_clock(start.elapsed().as_secs_f64());
-        terminal.draw(|f| ui::draw(f, app))?;
+        if last_draw.elapsed() >= draw_dur {
+            terminal.draw(|f| ui::draw(f, app))?;
+            last_draw = Instant::now();
+        }
 
         // Adopt the library index once the background scan reports in.
         if let Ok(tracks) = index_rx.try_recv() {
@@ -290,13 +326,29 @@ fn run_loop(
             }
         }
 
-        let timeout = frame_dur
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_default();
+        // Wake in time for whichever comes first — the next redraw or tick.
+        let timeout = draw_dur
+            .saturating_sub(last_draw.elapsed())
+            .min(tick_dur.saturating_sub(last_tick.elapsed()));
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Release {
-                    app.handle_key(map_key(key.code, key.modifiers))?;
+            // Drain everything queued this wake so an input burst is handled in
+            // one pass instead of one event per (rate-limited) redraw.
+            loop {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.kind != KeyEventKind::Release {
+                            app.handle_key(map_key(key.code, key.modifiers))?;
+                        }
+                    }
+                    Event::Mouse(me) => {
+                        if let Some(m) = map_mouse(me) {
+                            app.handle_mouse(m)?;
+                        }
+                    }
+                    _ => {}
+                }
+                if !event::poll(Duration::ZERO)? {
+                    break;
                 }
             }
         }
@@ -306,7 +358,7 @@ fn run_loop(
             app.handle_key(ev)?;
         }
 
-        if last_tick.elapsed() >= frame_dur {
+        if last_tick.elapsed() >= tick_dur {
             app.check_advance()?;
             app.tick_video();
             last_tick = Instant::now();

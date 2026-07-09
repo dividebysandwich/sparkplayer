@@ -35,6 +35,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.last_art_rect = None;
     app.last_browser_rect = None;
 
+    // Reset per-frame mouse hit-test rects; the panel renderers set the ones
+    // that are actually on screen this frame.
+    app.playlist_hit = None;
+    app.browser_hit = None;
+    app.progress_hit = None;
+    app.visualizer_hit = None;
+    app.volume_hit = None;
+    app.control_hits.clear();
+
     let has_video = app.video.has_image();
 
     if app.fullscreen.is_on() {

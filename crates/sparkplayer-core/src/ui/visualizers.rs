@@ -20,6 +20,8 @@ use super::cassette::{draw_cassette, draw_vhs};
 use super::palette::{cyan, green, lerp, panel_bg, pink, purple, red, rgb, yellow};
 
 pub(super) fn draw_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
+    // The whole panel is clickable to switch visualizer.
+    app.visualizer_hit = Some(area);
     let mode = app.visualizer.mode;
     let active = app.playing_index.is_some() && !app.audio.is_paused();
     let title = format!(" Visualizer — {} ", mode.label());

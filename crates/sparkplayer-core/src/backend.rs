@@ -54,6 +54,26 @@ impl CoreKeyEvent {
     }
 }
 
+/// Platform-neutral mouse event fed to [`crate::app::App::handle_mouse`]. Like
+/// [`CoreKeyEvent`], the native crate maps crossterm `MouseEvent`s into this so
+/// the hit-testing logic stays backend-free. `col`/`row` are terminal cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreMouseKind {
+    /// Left button pressed.
+    Down,
+    /// Left button held and moved (used for scrubbing the progress bar).
+    Drag,
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreMouseEvent {
+    pub kind: CoreMouseKind,
+    pub col: u16,
+    pub row: u16,
+}
+
 /// Audio playback + the visualizer sample tap. Native wraps rodio; web wraps a
 /// Web Audio graph fed from an `HTMLMediaElement`.
 pub trait AudioBackend {
