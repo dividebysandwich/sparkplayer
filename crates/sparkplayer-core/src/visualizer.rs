@@ -7,6 +7,13 @@ use crate::audio_tap::SampleBuffer;
 
 const FFT_SIZE: usize = 1024;
 const WAVE_SIZE: usize = 2048;
+/// Larger FFT used only by the time-frequency displays (spectrogram, waterfall)
+/// for ~4× finer frequency resolution — most noticeable in the bass, where the
+/// 1024-point FFT's ~43 Hz bins smear everything together. The longer window
+/// trades a little time resolution, which those scrolling views can absorb.
+/// At 44.1 kHz this is ~93 ms / ~11 Hz per bin; 4096 stereo frames also fit the
+/// 8192-sample tap exactly.
+const SPEC_FFT_SIZE: usize = 4096;
 
 /// Graphics waterfall image: frequency bins across (width), time rows down
 /// (height, newest on top). Scaled to the panel by the graphics backend.
@@ -126,6 +133,13 @@ pub struct Visualizer {
     samples: Vec<f32>,
     spectrum_buf: Vec<Complex32>,
     mags: Vec<f32>,
+    /// High-resolution FFT (`SPEC_FFT_SIZE`) for the spectrogram/waterfall.
+    spec_fft: Arc<dyn Fft<f32>>,
+    spec_window: Vec<f32>,
+    spec_window_sum: f32,
+    spec_samples: Vec<f32>,
+    spec_buf: Vec<Complex32>,
+    spec_mags: Vec<f32>,
     smoothed_bars: Vec<f32>,
     pub scroll_wave: VecDeque<f32>,
     pub spectrogram_cols: VecDeque<Vec<f32>>,
@@ -163,6 +177,44 @@ pub struct Levels {
     /// Inter-channel correlation in [-1, 1] (1 = mono, 0 = uncorrelated,
     /// -1 = out of phase).
     pub correlation: f32,
+}
+
+/// Reduce a half-spectrum magnitude slice into `bins` log-spaced bands, each a
+/// normalized 0..1 value mapped from `db_floor..(db_floor + db_range)` dBFS.
+/// The frequency→bin mapping uses `mags.len()`, so a longer FFT (more bins)
+/// automatically yields finer resolution — especially in the low end.
+fn log_bin_db_from(
+    mags: &[f32],
+    bins: usize,
+    sample_rate: u32,
+    db_floor: f32,
+    db_range: f32,
+) -> Vec<f32> {
+    let half = mags.len().max(1);
+    let sr = sample_rate.max(1) as f32;
+    let nyquist = sr * 0.5;
+    let f_min = 30.0f32;
+    let f_max = nyquist.min(16000.0);
+    let mut out = vec![0.0f32; bins];
+    for b in 0..bins {
+        let t0 = b as f32 / bins as f32;
+        let t1 = (b + 1) as f32 / bins as f32;
+        let f0 = f_min * (f_max / f_min).powf(t0);
+        let f1 = f_min * (f_max / f_min).powf(t1);
+        let i0 = (((f0 / nyquist) * half as f32).floor() as usize).min(half - 1);
+        let i1 = (((f1 / nyquist) * half as f32).ceil() as usize)
+            .min(half)
+            .max(i0 + 1);
+        // Sum power across the band, then take amplitude.
+        let mut power = 0.0f32;
+        for v in &mags[i0..i1] {
+            power += v * v;
+        }
+        let amp = power.sqrt();
+        let db = 20.0 * (amp.max(1e-7)).log10();
+        out[b] = ((db - db_floor) / db_range).clamp(0.0, 1.0);
+    }
+    out
 }
 
 /// Map a normalized magnitude (0..1) to the classic SDR waterfall gradient:
@@ -204,6 +256,14 @@ impl Visualizer {
             })
             .collect();
         let window_sum: f32 = window.iter().sum();
+        let spec_fft = planner.plan_fft_forward(SPEC_FFT_SIZE);
+        let spec_window: Vec<f32> = (0..SPEC_FFT_SIZE)
+            .map(|i| {
+                let x = i as f32 / (SPEC_FFT_SIZE - 1) as f32;
+                0.5 - 0.5 * (2.0 * std::f32::consts::PI * x).cos()
+            })
+            .collect();
+        let spec_window_sum: f32 = spec_window.iter().sum();
         Self {
             fft,
             window,
@@ -211,6 +271,12 @@ impl Visualizer {
             samples: vec![0.0; FFT_SIZE.max(WAVE_SIZE)],
             spectrum_buf: vec![Complex32::new(0.0, 0.0); FFT_SIZE],
             mags: vec![0.0; FFT_SIZE / 2],
+            spec_fft,
+            spec_window,
+            spec_window_sum,
+            spec_samples: vec![0.0; SPEC_FFT_SIZE],
+            spec_buf: vec![Complex32::new(0.0, 0.0); SPEC_FFT_SIZE],
+            spec_mags: vec![0.0; SPEC_FFT_SIZE / 2],
             smoothed_bars: Vec::new(),
             scroll_wave: VecDeque::new(),
             spectrogram_cols: VecDeque::new(),
@@ -289,35 +355,30 @@ impl Visualizer {
         }
     }
 
+    /// Fill `spec_mags` from the high-resolution FFT over the newest
+    /// `SPEC_FFT_SIZE` samples. Used by the time-frequency displays.
+    fn compute_spec_fft(&mut self, tap: &SampleBuffer) {
+        if self.spec_samples.len() < SPEC_FFT_SIZE {
+            self.spec_samples.resize(SPEC_FFT_SIZE, 0.0);
+        }
+        let _ = tap.latest_mono(&mut self.spec_samples[..SPEC_FFT_SIZE]);
+        for i in 0..SPEC_FFT_SIZE {
+            let s = self.spec_samples[i] * self.spec_window[i];
+            self.spec_buf[i] = Complex32::new(s, 0.0);
+        }
+        self.spec_fft.process(&mut self.spec_buf);
+        let half = SPEC_FFT_SIZE / 2;
+        let scale = 2.0 / self.spec_window_sum;
+        for i in 0..half {
+            let c = self.spec_buf[i];
+            self.spec_mags[i] = (c.re * c.re + c.im * c.im).sqrt() * scale;
+        }
+    }
+
     /// Reduce the half-spectrum into `bins` log-spaced bands, returning each as
     /// a normalized 0..1 value mapped from `db_floor..(db_floor + db_range)` dBFS.
     fn log_bin_db(&self, bins: usize, sample_rate: u32, db_floor: f32, db_range: f32) -> Vec<f32> {
-        let half = FFT_SIZE / 2;
-        let sr = sample_rate.max(1) as f32;
-        let nyquist = sr * 0.5;
-        let f_min = 30.0f32;
-        let f_max = nyquist.min(16000.0);
-        let mut out = vec![0.0f32; bins];
-        for b in 0..bins {
-            let t0 = b as f32 / bins as f32;
-            let t1 = (b + 1) as f32 / bins as f32;
-            let f0 = f_min * (f_max / f_min).powf(t0);
-            let f1 = f_min * (f_max / f_min).powf(t1);
-            let i0 = ((f0 / nyquist) * half as f32).floor() as usize;
-            let i1 = ((f1 / nyquist) * half as f32).ceil() as usize;
-            let i0 = i0.min(half - 1);
-            let i1 = i1.min(half).max(i0 + 1);
-            // Sum power across the band, then take amplitude.
-            let mut power = 0.0f32;
-            for v in &self.mags[i0..i1] {
-                power += v * v;
-            }
-            let amp = power.sqrt();
-            let db = 20.0 * (amp.max(1e-7)).log10();
-            let n = ((db - db_floor) / db_range).clamp(0.0, 1.0);
-            out[b] = n;
-        }
-        out
+        log_bin_db_from(&self.mags, bins, sample_rate, db_floor, db_range)
     }
 
     /// Spectrum bars: smoothed log-binned FFT mapped to 0..1.
@@ -461,9 +522,10 @@ impl Visualizer {
         active: bool,
     ) -> Vec<Vec<f32>> {
         if active {
-            self.compute_fft(tap);
+            // Hi-res FFT for finer low-frequency detail than the bar displays.
+            self.compute_spec_fft(tap);
             // Slightly tighter dynamic range than the bars so colors saturate nicely.
-            let col = self.log_bin_db(height, sample_rate, -70.0, 65.0);
+            let col = log_bin_db_from(&self.spec_mags, height, sample_rate, -70.0, 65.0);
             self.spectrogram_cols.push_back(col);
         }
         let cap = width.max(2);
@@ -493,8 +555,10 @@ impl Visualizer {
                 let mut t = last;
                 let mut added = 0;
                 while now_secs - t >= WATERFALL_ROW_DT && added < WATERFALL_ROWS {
-                    self.compute_fft(tap);
-                    let row = self.log_bin_db(
+                    // Hi-res FFT for finer low-frequency detail.
+                    self.compute_spec_fft(tap);
+                    let row = log_bin_db_from(
+                        &self.spec_mags,
                         WATERFALL_BINS,
                         sample_rate,
                         WATERFALL_DB_FLOOR,
@@ -582,8 +646,10 @@ impl Visualizer {
         active: bool,
     ) -> Vec<Vec<f32>> {
         if active {
-            self.compute_fft(tap);
-            let col = self.log_bin_db(bins, sample_rate, -75.0, 70.0);
+            // Hi-res FFT for finer low-frequency detail (like the spectrogram
+            // and waterfall); this scrolling view absorbs the longer window.
+            self.compute_spec_fft(tap);
+            let col = log_bin_db_from(&self.spec_mags, bins, sample_rate, -75.0, 70.0);
             self.spectrum_3d_rows.push_back(col);
         }
         let cap = depth.max(2);
