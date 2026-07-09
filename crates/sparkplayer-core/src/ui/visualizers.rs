@@ -604,8 +604,13 @@ fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
     if w == 0 || h == 0 {
         return;
     }
+    // On truecolor terminals, pack two frequency bins into each cell with a
+    // `▀` half-block (upper bin → foreground, lower bin → background), doubling
+    // the vertical resolution. Elsewhere fall back to one solid bin per cell.
+    let half = app.truecolor;
+    let bins = if half { h * 2 } else { h };
     let sr = app.audio.tap().sample_rate();
-    let cols = app.visualizer.spectrogram(app.audio.tap(), w, h, sr, active);
+    let cols = app.visualizer.spectrogram(app.audio.tap(), w, bins, sr, active);
     let buf = frame.buffer_mut();
     let n_cols = cols.len();
     let start_x = (area.width as usize).saturating_sub(n_cols);
@@ -614,17 +619,23 @@ fn draw_spectrogram(frame: &mut Frame, area: Rect, app: &mut App, active: bool) 
         if x >= area.x + area.width {
             break;
         }
-        for (yi, mag) in col.iter().enumerate() {
-            if yi >= h {
-                break;
-            }
-            let y = area.y + area.height - 1 - yi as u16;
-            let color = heatmap(*mag);
-            if let Some(cell) = buf.cell_mut((x, y)) {
+        for r in 0..h {
+            let y = area.y + area.height - 1 - r as u16;
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
+            if half {
+                // Two sub-bins per cell: bottom half is the lower frequency.
+                let lo = heatmap(col.get(2 * r).copied().unwrap_or(0.0));
+                let hi = heatmap(col.get(2 * r + 1).copied().unwrap_or(0.0));
+                cell.set_char('▀');
+                cell.set_fg(hi);
+                cell.set_bg(lo);
+            } else {
                 // Paint the cell via its background so it fills the full cell on
                 // the web canvas backend (a `█` glyph leaves a row gap there).
                 cell.set_char(' ');
-                cell.set_bg(color);
+                cell.set_bg(heatmap(col.get(r).copied().unwrap_or(0.0)));
             }
         }
     }

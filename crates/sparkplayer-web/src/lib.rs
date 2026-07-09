@@ -106,6 +106,9 @@ pub fn start() -> Result<(), JsValue> {
     );
     // The browser can open external links, so expose the escape-menu GitHub entry.
     app.url_open_supported = true;
+    // The canvas backend paints spectrogram cells via their background (glyphs
+    // leave a row gap), so keep it on the solid full-cell path, not half-blocks.
+    app.truecolor = false;
     let app: SharedApp = Rc::new(std::cell::RefCell::new(app));
     app.borrow_mut().status =
         String::from("Press any key (or pick files) to start — browser audio needs a gesture");

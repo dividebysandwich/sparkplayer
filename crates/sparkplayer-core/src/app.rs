@@ -306,6 +306,12 @@ pub struct App {
 
     pub theme: Theme,
 
+    /// Whether the display can render distinct 24-bit fg/bg colors per cell.
+    /// Lets the spectrogram use half-block cells (two colors → double vertical
+    /// resolution); when false it falls back to solid full-cell blocks. Native
+    /// sets it from `COLORTERM`; defaults on (the palette is 24-bit throughout).
+    pub truecolor: bool,
+
     /// Monotonic wall-clock seconds, supplied by the platform each frame. Used
     /// for UI animation and timed announcements. `std::time::Instant` is
     /// unavailable on wasm, so time always flows in through here instead.
@@ -419,6 +425,7 @@ impl App {
             url_open_supported: false,
             pending_url_open: None,
             theme,
+            truecolor: true,
             clock_secs: 0.0,
             last_video_rect: None,
             last_art_rect: None,

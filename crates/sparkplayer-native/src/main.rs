@@ -172,6 +172,7 @@ fn main() -> Result<()> {
         &cfg,
     );
     app.preferred_subtitle_lang = cli.subtitle_lang.clone();
+    app.truecolor = terminal_is_truecolor();
     if cli.video_window {
         app.video.set_external_window(true);
     }
@@ -271,6 +272,24 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Whether the terminal can render 24-bit color (gates the spectrogram's
+/// half-block resolution boost). Trusts the de-facto `COLORTERM=truecolor`/
+/// `24bit` signal when present; otherwise — since the whole UI palette is
+/// already 24-bit — assumes truecolor unless `TERM` names a genuinely
+/// low-color display (the Linux VT console or a dumb/unset terminal).
+fn terminal_is_truecolor() -> bool {
+    if let Ok(ct) = std::env::var("COLORTERM") {
+        let ct = ct.to_ascii_lowercase();
+        if ct.contains("truecolor") || ct.contains("24bit") {
+            return true;
+        }
+    }
+    !matches!(
+        std::env::var("TERM").ok().as_deref(),
+        Some("linux") | Some("dumb") | Some("") | None
+    )
 }
 
 /// Translate a crossterm mouse event into the platform-neutral core event. Only
