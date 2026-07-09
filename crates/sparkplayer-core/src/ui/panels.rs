@@ -461,15 +461,20 @@ fn draw_transport(frame: &mut Frame, area: Rect, app: &App) -> Vec<(Rect, MouseC
         return Vec::new();
     }
     let playing = app.playing_index.is_some() && !app.audio.is_paused();
-    let play_sym = if playing { "⏸" } else { "▶" };
+    // Use ► (U+25BA) rather than ▶ (U+25B6): the latter has an emoji
+    // presentation that many terminals render two cells wide, which throws off
+    // the centering (ratatui models it as one). ► has no emoji form.
+    let play_sym = if playing { "⏸" } else { "►" };
     let buttons: [(&str, MouseControl, Color); 4] = [
         ("<<", MouseControl::SeekBack, cyan()),
         ("■", MouseControl::Stop, red()),
         (play_sym, MouseControl::PlayPause, green()),
         (">>", MouseControl::SeekForward, cyan()),
     ];
-    // Fixed button width; centers each glyph in a wide, easy-to-click key.
-    const BTN_W: u16 = 8;
+    // Each button is at least MIN_W wide, bumped up by one when needed so the
+    // padding around its glyph is even — otherwise an odd leftover leaves a
+    // one-cell bias and the glyph looks off-center (worst for width-1 symbols).
+    const MIN_W: u16 = 8;
     const GAP: u16 = 2;
     let style = |bg: Color| {
         Style::default()
@@ -477,28 +482,37 @@ fn draw_transport(frame: &mut Frame, area: Rect, app: &App) -> Vec<(Rect, MouseC
             .bg(bg)
             .add_modifier(Modifier::BOLD)
     };
+    let sized: Vec<(&str, MouseControl, Color, u16, u16)> = buttons
+        .iter()
+        .map(|(sym, action, bg)| {
+            let symw = Span::raw(*sym).width() as u16;
+            let mut w = MIN_W.max(symw);
+            if !(w - symw).is_multiple_of(2) {
+                w += 1;
+            }
+            (*sym, *action, *bg, symw, w)
+        })
+        .collect();
 
-    let total: u16 = BTN_W * buttons.len() as u16 + GAP * (buttons.len() as u16 - 1);
+    let total: u16 =
+        sized.iter().map(|s| s.4).sum::<u16>() + GAP * (sized.len() as u16 - 1);
     let start_x = area.x + area.width.saturating_sub(total) / 2;
 
     let mut out: Vec<Span> = vec![Span::raw(" ".repeat((start_x - area.x) as usize))];
     let mut hits: Vec<(Rect, MouseControl)> = Vec::new();
     let mut x = start_x;
-    for (i, (sym, action, bg)) in buttons.iter().enumerate() {
-        // Center the glyph within BTN_W cells.
-        let symw = Span::raw(*sym).width() as u16;
-        let pad = BTN_W.saturating_sub(symw);
-        let left = pad / 2;
+    for (i, (sym, action, bg, symw, w)) in sized.iter().enumerate() {
+        let left = (w - symw) / 2; // even padding → glyph exactly centered
         let label = format!(
             "{}{}{}",
             " ".repeat(left as usize),
             sym,
-            " ".repeat((pad - left) as usize)
+            " ".repeat((w - symw - left) as usize)
         );
-        hits.push((Rect::new(x, area.y, BTN_W, 1), *action));
+        hits.push((Rect::new(x, area.y, *w, 1), *action));
         out.push(Span::styled(label, style(*bg)));
-        x += BTN_W;
-        if i + 1 < buttons.len() {
+        x += w;
+        if i + 1 < sized.len() {
             out.push(Span::raw(" ".repeat(GAP as usize)));
             x += GAP;
         }
