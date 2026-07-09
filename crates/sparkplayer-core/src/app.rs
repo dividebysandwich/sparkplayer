@@ -91,6 +91,7 @@ pub enum EscapeMenuKind {
     Subtitle,
     AvOffset,
     Visualizer,
+    FftSize,
     Theme,
     Fullscreen,
     VideoWindow,
@@ -357,6 +358,7 @@ impl App {
         if let Some(mode) = VisMode::from_name(&cfg.visualizer) {
             visualizer.mode = mode;
         }
+        visualizer.set_fft_size(cfg.fft_size);
         let theme = theme::by_name(&cfg.theme);
         theme::set_current(theme);
         let mut playlist_state = ListState::default();
@@ -1070,6 +1072,7 @@ impl App {
             theme: self.theme.name.to_string(),
             volume: self.audio.volume(),
             visualizer: self.visualizer.mode.name().to_string(),
+            fft_size: self.visualizer.fft_size(),
             last_dir: Some(self.browser_dir.to_string_lossy().to_string()),
             repeat: self.repeat.label().to_ascii_lowercase(),
             shuffle: self.shuffle,
@@ -1251,6 +1254,20 @@ impl App {
     pub fn cycle_visualizer_back(&mut self) {
         self.visualizer.toggle_mode_back();
         self.status = format!("Visualizer: {}", self.visualizer.mode.label());
+        self.save_config();
+    }
+
+    /// Step the spectrum FFT window to the next/previous supported size. Larger
+    /// windows give finer frequency resolution (esp. bass) but slower response.
+    pub fn step_fft_size(&mut self, delta: i32) {
+        let sizes = crate::visualizer::FFT_SIZES;
+        let cur = self.visualizer.fft_size();
+        let pos = sizes.iter().position(|&s| s == cur).unwrap_or(0) as i32;
+        let next = (pos + delta).clamp(0, sizes.len() as i32 - 1) as usize;
+        let size = sizes[next];
+        self.visualizer.set_fft_size(size);
+        let hz = self.audio.tap().sample_rate() as f64 / size as f64;
+        self.status = format!("FFT window: {size} samples ({hz:.1} Hz/bin)");
         self.save_config();
     }
 
@@ -1454,6 +1471,12 @@ impl App {
                 value: self.visualizer.mode.label().to_string(),
             },
             EscapeMenuItem {
+                kind: EscapeMenuKind::FftSize,
+                enabled: true,
+                label: "FFT Resolution",
+                value: format!("{} samples", self.visualizer.fft_size()),
+            },
+            EscapeMenuItem {
                 kind: EscapeMenuKind::Theme,
                 enabled: true,
                 label: "Theme",
@@ -1573,6 +1596,7 @@ impl App {
                     self.cycle_visualizer_back();
                 }
             }
+            EscapeMenuKind::FftSize => self.step_fft_size(delta),
             EscapeMenuKind::Theme => {
                 if delta > 0 {
                     self.cycle_theme();

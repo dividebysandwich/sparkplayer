@@ -8,7 +8,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const TAP_CAPACITY: usize = 8192;
+// Holds enough interleaved samples for the largest FFT window (16384 mono
+// frames × 2 channels) the visualizer can be configured to use, so a stereo
+// window is never truncated.
+const TAP_CAPACITY: usize = 32768;
 
 #[derive(Clone, Default)]
 pub struct SampleBuffer {

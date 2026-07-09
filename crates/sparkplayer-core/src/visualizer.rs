@@ -5,15 +5,18 @@ use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 
 use crate::audio_tap::SampleBuffer;
 
-const FFT_SIZE: usize = 1024;
+/// Default FFT window size, shared by every spectrum visualization and tunable
+/// from the settings dialog. Larger = finer frequency resolution (most visible
+/// in the bass, where a small FFT's wide bins smear everything together) at the
+/// cost of time resolution / beat responsiveness. At 44.1 kHz, 8192 samples is
+/// ~5.4 Hz per bin over a ~186 ms window.
+pub const FFT_DEFAULT_SIZE: usize = 8192;
+const FFT_MIN_SIZE: usize = 1024;
+const FFT_MAX_SIZE: usize = 16384;
+/// Selectable FFT sizes for the settings dialog (powers of two). The largest
+/// must satisfy `2 * size <= TAP_CAPACITY` so a stereo window isn't truncated.
+pub const FFT_SIZES: &[usize] = &[1024, 2048, 4096, 8192, 16384];
 const WAVE_SIZE: usize = 2048;
-/// Larger FFT used only by the time-frequency displays (spectrogram, waterfall)
-/// for ~4× finer frequency resolution — most noticeable in the bass, where the
-/// 1024-point FFT's ~43 Hz bins smear everything together. The longer window
-/// trades a little time resolution, which those scrolling views can absorb.
-/// At 44.1 kHz this is ~93 ms / ~11 Hz per bin; 4096 stereo frames also fit the
-/// 8192-sample tap exactly.
-const SPEC_FFT_SIZE: usize = 4096;
 
 /// Graphics waterfall image: frequency bins across (width), time rows down
 /// (height, newest on top). Scaled to the panel by the graphics backend.
@@ -127,19 +130,14 @@ impl VisMode {
 }
 
 pub struct Visualizer {
+    /// Current FFT window size (power of two); reconfigured via `set_fft_size`.
+    fft_size: usize,
     fft: Arc<dyn Fft<f32>>,
     window: Vec<f32>,
     window_sum: f32,
     samples: Vec<f32>,
     spectrum_buf: Vec<Complex32>,
     mags: Vec<f32>,
-    /// High-resolution FFT (`SPEC_FFT_SIZE`) for the spectrogram/waterfall.
-    spec_fft: Arc<dyn Fft<f32>>,
-    spec_window: Vec<f32>,
-    spec_window_sum: f32,
-    spec_samples: Vec<f32>,
-    spec_buf: Vec<Complex32>,
-    spec_mags: Vec<f32>,
     smoothed_bars: Vec<f32>,
     pub scroll_wave: VecDeque<f32>,
     pub spectrogram_cols: VecDeque<Vec<f32>>,
@@ -217,6 +215,30 @@ fn log_bin_db_from(
     out
 }
 
+/// Plan a forward FFT of `size` and build its matching Hann window (returned
+/// with the window's coherent-gain sum).
+fn plan_fft(size: usize) -> (Arc<dyn Fft<f32>>, Vec<f32>, f32) {
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(size);
+    let window: Vec<f32> = (0..size)
+        .map(|i| {
+            let x = i as f32 / (size - 1).max(1) as f32;
+            0.5 - 0.5 * (2.0 * std::f32::consts::PI * x).cos()
+        })
+        .collect();
+    let window_sum = window.iter().sum();
+    (fft, window, window_sum)
+}
+
+/// Snap a requested FFT size to a supported power of two within range.
+pub fn clamp_fft_size(size: usize) -> usize {
+    let size = size.clamp(FFT_MIN_SIZE, FFT_MAX_SIZE);
+    let mut p = FFT_MIN_SIZE;
+    while p * 2 <= size {
+        p *= 2;
+    }
+    p
+}
+
 /// Map a normalized magnitude (0..1) to the classic SDR waterfall gradient:
 /// dark blue → blue → cyan → green → yellow → orange → red → white.
 pub(crate) fn waterfall_color(t: f32) -> (u8, u8, u8) {
@@ -247,36 +269,16 @@ pub(crate) fn waterfall_color(t: f32) -> (u8, u8, u8) {
 
 impl Visualizer {
     pub fn new() -> Self {
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(FFT_SIZE);
-        let window: Vec<f32> = (0..FFT_SIZE)
-            .map(|i| {
-                let x = i as f32 / (FFT_SIZE - 1) as f32;
-                0.5 - 0.5 * (2.0 * std::f32::consts::PI * x).cos()
-            })
-            .collect();
-        let window_sum: f32 = window.iter().sum();
-        let spec_fft = planner.plan_fft_forward(SPEC_FFT_SIZE);
-        let spec_window: Vec<f32> = (0..SPEC_FFT_SIZE)
-            .map(|i| {
-                let x = i as f32 / (SPEC_FFT_SIZE - 1) as f32;
-                0.5 - 0.5 * (2.0 * std::f32::consts::PI * x).cos()
-            })
-            .collect();
-        let spec_window_sum: f32 = spec_window.iter().sum();
+        let fft_size = FFT_DEFAULT_SIZE;
+        let (fft, window, window_sum) = plan_fft(fft_size);
         Self {
+            fft_size,
             fft,
             window,
             window_sum,
-            samples: vec![0.0; FFT_SIZE.max(WAVE_SIZE)],
-            spectrum_buf: vec![Complex32::new(0.0, 0.0); FFT_SIZE],
-            mags: vec![0.0; FFT_SIZE / 2],
-            spec_fft,
-            spec_window,
-            spec_window_sum,
-            spec_samples: vec![0.0; SPEC_FFT_SIZE],
-            spec_buf: vec![Complex32::new(0.0, 0.0); SPEC_FFT_SIZE],
-            spec_mags: vec![0.0; SPEC_FFT_SIZE / 2],
+            samples: vec![0.0; fft_size.max(WAVE_SIZE)],
+            spectrum_buf: vec![Complex32::new(0.0, 0.0); fft_size],
+            mags: vec![0.0; fft_size / 2],
             smoothed_bars: Vec::new(),
             scroll_wave: VecDeque::new(),
             spectrogram_cols: VecDeque::new(),
@@ -299,6 +301,31 @@ impl Visualizer {
             last_consumed_for_plasma: 0,
             mode: VisMode::Spectrum,
         }
+    }
+
+    /// The active FFT window size.
+    pub fn fft_size(&self) -> usize {
+        self.fft_size
+    }
+
+    /// Reconfigure the FFT window size (snapped to a supported power of two),
+    /// rebuilding the plan, window, and work buffers. Scrolling history is kept
+    /// as-is — it stores display bins, whose count is independent of FFT size.
+    pub fn set_fft_size(&mut self, size: usize) {
+        let size = clamp_fft_size(size);
+        if size == self.fft_size {
+            return;
+        }
+        let (fft, window, window_sum) = plan_fft(size);
+        self.fft = fft;
+        self.window = window;
+        self.window_sum = window_sum;
+        self.fft_size = size;
+        if self.samples.len() < size.max(WAVE_SIZE) {
+            self.samples.resize(size.max(WAVE_SIZE), 0.0);
+        }
+        self.spectrum_buf = vec![Complex32::new(0.0, 0.0); size];
+        self.mags = vec![0.0; size / 2];
     }
 
     /// Seconds of audio played since `watermark` was last updated, syncing the
@@ -336,42 +363,23 @@ impl Visualizer {
     }
 
     fn compute_fft(&mut self, tap: &SampleBuffer) {
-        if self.samples.len() < FFT_SIZE {
-            self.samples.resize(FFT_SIZE, 0.0);
+        let n = self.fft_size;
+        if self.samples.len() < n {
+            self.samples.resize(n, 0.0);
         }
-        let _ = tap.latest_mono(&mut self.samples[..FFT_SIZE]);
-        for i in 0..FFT_SIZE {
+        let _ = tap.latest_mono(&mut self.samples[..n]);
+        for i in 0..n {
             let s = self.samples[i] * self.window[i];
             self.spectrum_buf[i] = Complex32::new(s, 0.0);
         }
         self.fft.process(&mut self.spectrum_buf);
-        let half = FFT_SIZE / 2;
+        let half = n / 2;
         // Coherent normalization: full-scale sine -> magnitude 1.0 in its bin.
         let scale = 2.0 / self.window_sum;
         for i in 0..half {
             let c = self.spectrum_buf[i];
             let mag = (c.re * c.re + c.im * c.im).sqrt() * scale;
             self.mags[i] = mag;
-        }
-    }
-
-    /// Fill `spec_mags` from the high-resolution FFT over the newest
-    /// `SPEC_FFT_SIZE` samples. Used by the time-frequency displays.
-    fn compute_spec_fft(&mut self, tap: &SampleBuffer) {
-        if self.spec_samples.len() < SPEC_FFT_SIZE {
-            self.spec_samples.resize(SPEC_FFT_SIZE, 0.0);
-        }
-        let _ = tap.latest_mono(&mut self.spec_samples[..SPEC_FFT_SIZE]);
-        for i in 0..SPEC_FFT_SIZE {
-            let s = self.spec_samples[i] * self.spec_window[i];
-            self.spec_buf[i] = Complex32::new(s, 0.0);
-        }
-        self.spec_fft.process(&mut self.spec_buf);
-        let half = SPEC_FFT_SIZE / 2;
-        let scale = 2.0 / self.spec_window_sum;
-        for i in 0..half {
-            let c = self.spec_buf[i];
-            self.spec_mags[i] = (c.re * c.re + c.im * c.im).sqrt() * scale;
         }
     }
 
@@ -522,10 +530,9 @@ impl Visualizer {
         active: bool,
     ) -> Vec<Vec<f32>> {
         if active {
-            // Hi-res FFT for finer low-frequency detail than the bar displays.
-            self.compute_spec_fft(tap);
+            self.compute_fft(tap);
             // Slightly tighter dynamic range than the bars so colors saturate nicely.
-            let col = log_bin_db_from(&self.spec_mags, height, sample_rate, -70.0, 65.0);
+            let col = self.log_bin_db(height, sample_rate, -70.0, 65.0);
             self.spectrogram_cols.push_back(col);
         }
         let cap = width.max(2);
@@ -555,10 +562,8 @@ impl Visualizer {
                 let mut t = last;
                 let mut added = 0;
                 while now_secs - t >= WATERFALL_ROW_DT && added < WATERFALL_ROWS {
-                    // Hi-res FFT for finer low-frequency detail.
-                    self.compute_spec_fft(tap);
-                    let row = log_bin_db_from(
-                        &self.spec_mags,
+                    self.compute_fft(tap);
+                    let row = self.log_bin_db(
                         WATERFALL_BINS,
                         sample_rate,
                         WATERFALL_DB_FLOOR,
@@ -646,10 +651,8 @@ impl Visualizer {
         active: bool,
     ) -> Vec<Vec<f32>> {
         if active {
-            // Hi-res FFT for finer low-frequency detail (like the spectrogram
-            // and waterfall); this scrolling view absorbs the longer window.
-            self.compute_spec_fft(tap);
-            let col = log_bin_db_from(&self.spec_mags, bins, sample_rate, -75.0, 70.0);
+            self.compute_fft(tap);
+            let col = self.log_bin_db(bins, sample_rate, -75.0, 70.0);
             self.spectrum_3d_rows.push_back(col);
         }
         let cap = depth.max(2);

@@ -10,6 +10,8 @@ pub struct Config {
     pub theme: String,
     pub volume: f32,
     pub visualizer: String,
+    /// FFT window size for the spectrum visualizers (power of two).
+    pub fft_size: usize,
 
     /// Last browser directory (native). Empty/None on first run or web.
     pub last_dir: Option<String>,
@@ -41,6 +43,7 @@ impl Default for Config {
             theme: "default".to_string(),
             volume: 0.8,
             visualizer: "spectrum".to_string(),
+            fft_size: crate::visualizer::FFT_DEFAULT_SIZE,
             last_dir: None,
             repeat: "off".to_string(),
             shuffle: false,
@@ -78,6 +81,11 @@ impl Config {
                     }
                 }
                 "visualizer" => cfg.visualizer = val.to_string(),
+                "fft_size" => {
+                    if let Ok(v) = val.parse::<usize>() {
+                        cfg.fft_size = crate::visualizer::clamp_fft_size(v);
+                    }
+                }
                 "last_dir" if !val.is_empty() => cfg.last_dir = Some(val.to_string()),
                 "repeat" => {
                     let v = val.to_ascii_lowercase();
@@ -124,6 +132,7 @@ impl Config {
         out.push_str(&format!("theme = \"{}\"\n", self.theme));
         out.push_str(&format!("volume = {}\n", self.volume));
         out.push_str(&format!("visualizer = \"{}\"\n", self.visualizer));
+        out.push_str(&format!("fft_size = {}\n", self.fft_size));
         out.push_str(&format!("repeat = \"{}\"\n", self.repeat));
         out.push_str(&format!("shuffle = {}\n", self.shuffle));
         if let Some(dir) = &self.last_dir {
@@ -159,6 +168,7 @@ mod tests {
             theme: "dracula".to_string(),
             volume: 0.65,
             visualizer: "waveform".to_string(),
+            fft_size: 4096,
             last_dir: Some("/home/me/Music".to_string()),
             repeat: "all".to_string(),
             shuffle: true,
