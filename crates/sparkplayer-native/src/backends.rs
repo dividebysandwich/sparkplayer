@@ -330,6 +330,34 @@ impl AlbumArtRenderer for NativeAlbumArt {
             );
         }
     }
+
+    fn graphics_available(&self) -> bool {
+        // Halfblocks are just colored cells, not pixel graphics.
+        !matches!(self.picker.borrow().protocol_type(), ProtocolType::Halfblocks)
+    }
+
+    fn render_rgb_frame(&mut self, frame: &mut Frame, area: Rect, rgb: &[u8], w: u32, h: u32) {
+        if area.width == 0 || area.height == 0 || w == 0 || h == 0 {
+            return;
+        }
+        let Some(src) = image::RgbImage::from_raw(w, h, rgb.to_vec()) else {
+            return;
+        };
+        // Stretch to the panel's exact pixel size (fill, not aspect-fit) with a
+        // smooth filter — the interpolated look of a hardware waterfall.
+        let font = self.picker.borrow().font_size();
+        let px_w = (area.width as u32 * font.width.max(1) as u32).max(1);
+        let px_h = (area.height as u32 * font.height.max(1) as u32).max(1);
+        let stretched =
+            image::imageops::resize(&src, px_w, px_h, image::imageops::FilterType::Triangle);
+        let dyn_img = image::DynamicImage::ImageRgb8(stretched);
+        let mut proto = self.picker.borrow_mut().new_resize_protocol(dyn_img);
+        frame.render_stateful_widget(
+            StatefulImage::default().resize(Resize::Scale(None)),
+            area,
+            &mut proto,
+        );
+    }
 }
 
 /// Config store backed by a file under the OS config dir.

@@ -8,6 +8,16 @@ use crate::audio_tap::SampleBuffer;
 const FFT_SIZE: usize = 1024;
 const WAVE_SIZE: usize = 2048;
 
+/// Graphics waterfall image: frequency bins across (width), time rows down
+/// (height, newest on top). Scaled to the panel by the graphics backend.
+const WATERFALL_BINS: usize = 256;
+const WATERFALL_ROWS: usize = 192;
+/// Seconds between scroll rows — decouples the scroll speed from the (variable)
+/// redraw rate so the waterfall advances at a steady ~30 rows/s.
+const WATERFALL_ROW_DT: f64 = 1.0 / 30.0;
+const WATERFALL_DB_FLOOR: f32 = -72.0;
+const WATERFALL_DB_RANGE: f32 = 70.0;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum VisMode {
     Spectrum,
@@ -16,6 +26,7 @@ pub enum VisMode {
     Waveform,
     ScrollingWaveform,
     Spectrogram,
+    Waterfall,
     Lissajous,
     Vu,
     Spectrum3D,
@@ -32,6 +43,7 @@ impl VisMode {
             VisMode::Waveform => "Waveform",
             VisMode::ScrollingWaveform => "Scrolling Wave",
             VisMode::Spectrogram => "Spectrogram",
+            VisMode::Waterfall => "Waterfall",
             VisMode::Lissajous => "Stereo X/Y",
             VisMode::Vu => "VU Meters",
             VisMode::Spectrum3D => "Spectrum 3D",
@@ -46,7 +58,8 @@ impl VisMode {
             VisMode::Radial => VisMode::Waveform,
             VisMode::Waveform => VisMode::ScrollingWaveform,
             VisMode::ScrollingWaveform => VisMode::Spectrogram,
-            VisMode::Spectrogram => VisMode::Lissajous,
+            VisMode::Spectrogram => VisMode::Waterfall,
+            VisMode::Waterfall => VisMode::Lissajous,
             VisMode::Lissajous => VisMode::Vu,
             VisMode::Vu => VisMode::Spectrum3D,
             VisMode::Spectrum3D => VisMode::Plasma,
@@ -62,7 +75,8 @@ impl VisMode {
             VisMode::Waveform => VisMode::Radial,
             VisMode::ScrollingWaveform => VisMode::Waveform,
             VisMode::Spectrogram => VisMode::ScrollingWaveform,
-            VisMode::Lissajous => VisMode::Spectrogram,
+            VisMode::Waterfall => VisMode::Spectrogram,
+            VisMode::Lissajous => VisMode::Waterfall,
             VisMode::Vu => VisMode::Lissajous,
             VisMode::Spectrum3D => VisMode::Vu,
             VisMode::Plasma => VisMode::Spectrum3D,
@@ -78,6 +92,7 @@ impl VisMode {
             VisMode::Waveform => "waveform",
             VisMode::ScrollingWaveform => "scrolling-wave",
             VisMode::Spectrogram => "spectrogram",
+            VisMode::Waterfall => "waterfall",
             VisMode::Lissajous => "lissajous",
             VisMode::Vu => "vu",
             VisMode::Spectrum3D => "spectrum-3d",
@@ -93,6 +108,7 @@ impl VisMode {
             "waveform" => VisMode::Waveform,
             "scrolling-wave" => VisMode::ScrollingWaveform,
             "spectrogram" => VisMode::Spectrogram,
+            "waterfall" => VisMode::Waterfall,
             "lissajous" => VisMode::Lissajous,
             "vu" => VisMode::Vu,
             "spectrum-3d" => VisMode::Spectrum3D,
@@ -113,6 +129,11 @@ pub struct Visualizer {
     smoothed_bars: Vec<f32>,
     pub scroll_wave: VecDeque<f32>,
     pub spectrogram_cols: VecDeque<Vec<f32>>,
+    /// Time-ordered magnitude rows for the waterfall (oldest front, newest
+    /// back), the RGB image built from them, and the clock of the last row.
+    waterfall_rows: VecDeque<Vec<f32>>,
+    waterfall_img: Vec<u8>,
+    waterfall_last_secs: Option<f64>,
     last_consumed_for_scroll: u64,
     stereo_samples: Vec<(f32, f32)>,
     pub spectrum_3d_rows: VecDeque<Vec<f32>>,
@@ -144,6 +165,34 @@ pub struct Levels {
     pub correlation: f32,
 }
 
+/// Map a normalized magnitude (0..1) to the classic SDR waterfall gradient:
+/// dark blue → blue → cyan → green → yellow → orange → red → white.
+pub(crate) fn waterfall_color(t: f32) -> (u8, u8, u8) {
+    const STOPS: [(f32, (u8, u8, u8)); 9] = [
+        (0.00, (6, 8, 45)),      // near-black deep blue (noise floor)
+        (0.14, (16, 42, 135)),   // blue
+        (0.30, (0, 120, 190)),   // cyan-blue
+        (0.45, (0, 190, 120)),   // green
+        (0.60, (170, 215, 40)),  // yellow-green
+        (0.74, (245, 220, 45)),  // yellow
+        (0.85, (245, 140, 30)),  // orange
+        (0.94, (225, 45, 35)),   // red
+        (1.00, (255, 255, 255)), // white (peaks)
+    ];
+    let t = t.clamp(0.0, 1.0);
+    for i in 1..STOPS.len() {
+        if t <= STOPS[i].0 {
+            let (lo, hi) = (STOPS[i - 1].0, STOPS[i].0);
+            let k = if hi > lo { (t - lo) / (hi - lo) } else { 0.0 };
+            let (r1, g1, b1) = STOPS[i - 1].1;
+            let (r2, g2, b2) = STOPS[i].1;
+            let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k) as u8;
+            return (lerp(r1, r2), lerp(g1, g2), lerp(b1, b2));
+        }
+    }
+    STOPS[STOPS.len() - 1].1
+}
+
 impl Visualizer {
     pub fn new() -> Self {
         let mut planner = FftPlanner::<f32>::new();
@@ -165,6 +214,9 @@ impl Visualizer {
             smoothed_bars: Vec::new(),
             scroll_wave: VecDeque::new(),
             spectrogram_cols: VecDeque::new(),
+            waterfall_rows: VecDeque::new(),
+            waterfall_img: vec![0; WATERFALL_BINS * WATERFALL_ROWS * 3],
+            waterfall_last_secs: None,
             last_consumed_for_scroll: 0,
             stereo_samples: Vec::new(),
             spectrum_3d_rows: VecDeque::new(),
@@ -419,6 +471,80 @@ impl Visualizer {
             self.spectrogram_cols.pop_front();
         }
         self.spectrogram_cols.iter().cloned().collect()
+    }
+
+    /// Advance the waterfall: append new FFT rows for the time elapsed since the
+    /// last one (steady ~30 rows/s, independent of redraw rate) and rebuild the
+    /// RGB image. Returns the image dimensions `(width, height)` in pixels; the
+    /// pixels themselves are read via [`Self::waterfall_pixels`]. `now_secs` is
+    /// the platform wall clock.
+    pub fn waterfall(
+        &mut self,
+        tap: &SampleBuffer,
+        sample_rate: u32,
+        active: bool,
+        now_secs: f64,
+    ) -> (u32, u32) {
+        match self.waterfall_last_secs {
+            None => self.waterfall_last_secs = Some(now_secs),
+            Some(last) if active => {
+                // Add one row per elapsed WATERFALL_ROW_DT, capped so a long
+                // stall (or a clock jump) can't spew a huge burst of rows.
+                let mut t = last;
+                let mut added = 0;
+                while now_secs - t >= WATERFALL_ROW_DT && added < WATERFALL_ROWS {
+                    self.compute_fft(tap);
+                    let row = self.log_bin_db(
+                        WATERFALL_BINS,
+                        sample_rate,
+                        WATERFALL_DB_FLOOR,
+                        WATERFALL_DB_RANGE,
+                    );
+                    self.waterfall_rows.push_back(row);
+                    t += WATERFALL_ROW_DT;
+                    added += 1;
+                }
+                // If we fell far behind, resync rather than chase forever.
+                self.waterfall_last_secs = Some(if added == WATERFALL_ROWS { now_secs } else { t });
+                while self.waterfall_rows.len() > WATERFALL_ROWS {
+                    self.waterfall_rows.pop_front();
+                }
+            }
+            // Paused: hold the timeline so it doesn't lurch on resume.
+            Some(_) => self.waterfall_last_secs = Some(now_secs),
+        }
+        self.rebuild_waterfall_image();
+        (WATERFALL_BINS as u32, WATERFALL_ROWS as u32)
+    }
+
+    /// The current waterfall image as row-major RGB8, `WATERFALL_BINS` wide.
+    pub fn waterfall_pixels(&self) -> &[u8] {
+        &self.waterfall_img
+    }
+
+    /// The raw magnitude rows (oldest first), for the cell-based fallback used
+    /// on terminals without pixel graphics.
+    pub fn waterfall_rows(&self) -> &VecDeque<Vec<f32>> {
+        &self.waterfall_rows
+    }
+
+    /// Repaint `waterfall_img` from `waterfall_rows`, newest row on top. Rows
+    /// not yet filled show the palette's floor color (dark blue).
+    fn rebuild_waterfall_image(&mut self) {
+        let rows = &self.waterfall_rows;
+        let n = rows.len();
+        for y in 0..WATERFALL_ROWS {
+            // y = 0 is the top = newest row.
+            let row = if y < n { Some(&rows[n - 1 - y]) } else { None };
+            for x in 0..WATERFALL_BINS {
+                let mag = row.and_then(|r| r.get(x)).copied().unwrap_or(0.0);
+                let (r, g, b) = waterfall_color(mag);
+                let idx = (y * WATERFALL_BINS + x) * 3;
+                self.waterfall_img[idx] = r;
+                self.waterfall_img[idx + 1] = g;
+                self.waterfall_img[idx + 2] = b;
+            }
+        }
     }
 
     /// Latest stereo frames for an X/Y oscillogram. Returns a slice of (L, R)

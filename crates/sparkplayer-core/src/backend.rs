@@ -207,4 +207,14 @@ pub trait AlbumArtRenderer {
     fn has_art(&self) -> bool;
     /// Draw the art into `area` (native) or reposition the `<img>` overlay (web).
     fn render(&mut self, frame: &mut Frame, area: Rect);
+    /// Whether the backend can paint true pixel graphics (sixel/kitty/iterm),
+    /// as opposed to only colored cells. Gates the graphics waterfall
+    /// visualizer, which falls back to a cell renderer when this is false.
+    fn graphics_available(&self) -> bool {
+        false
+    }
+    /// Render a row-major RGB8 image (`w`×`h`) stretched to fill `area` via the
+    /// terminal graphics protocol. No-op on backends without pixel graphics.
+    fn render_rgb_frame(&mut self, _frame: &mut Frame, _area: Rect, _rgb: &[u8], _w: u32, _h: u32) {
+    }
 }
