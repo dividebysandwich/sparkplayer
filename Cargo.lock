@@ -3079,6 +3079,7 @@ dependencies = [
  "dirs",
  "ffmpeg-next",
  "image",
+ "libc",
  "lofty",
  "ratatui",
  "ratatui-image",
@@ -3088,6 +3089,7 @@ dependencies = [
  "sparkplayer-core",
  "symphonia 0.6.0",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -29,6 +29,7 @@ ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", 
 sdl2 = { version = "0.38", default-features = false }
 ab_glyph = "0.2"
 souvlaki = "0.8"
+libc = "0.2"
 
 [package.metadata.deb]
 name = "sparkplayer"
@@ -51,3 +52,5 @@ assets = [
 [package.metadata.wix]
 upgrade-guid = "8E83D6C4-5D8F-4F2E-9A19-1A8E5C2B3E4F"
 path-guid = "4B6A1C2E-9D7F-4E3A-8C5B-6F2D9E1A4B7C"
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_System_SystemServices"] }

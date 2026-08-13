@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+use anyhow::{Context, Result};
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
     SeekDirection,
@@ -58,12 +59,13 @@ pub struct MediaOs {
 }
 
 impl MediaOs {
-    pub fn new() -> Result<Self, souvlaki::Error> {
+    pub fn new() -> Result<Self> {
         let config = PlatformConfig {
             dbus_name: "sparkplayer",
             display_name: "SparkPlayer",
-            // Windows wants the console/window handle here; harmless elsewhere.
-            hwnd: None,
+            // Windows SMTC requires a window handle. For this terminal app, the
+            // console window is the closest owner; other platforms ignore it.
+            hwnd: platform_hwnd().context("Windows media controls require a window handle")?,
         };
         let mut controls = MediaControls::new(config)?;
 
@@ -178,4 +180,23 @@ impl MediaOs {
         fs::write(&path, bytes).ok()?;
         Some(format!("file://{}", path.to_string_lossy()))
     }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_hwnd() -> Result<Option<*mut std::ffi::c_void>> {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+    }
+
+    let hwnd = unsafe { GetConsoleWindow() };
+    if hwnd.is_null() {
+        anyhow::bail!("no console window handle is available");
+    }
+    Ok(Some(hwnd))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_hwnd() -> Result<Option<*mut std::ffi::c_void>> {
+    Ok(None)
 }
