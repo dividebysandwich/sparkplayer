@@ -99,6 +99,17 @@ impl SampleBuffer {
         }
     }
 
+    /// Restart position tracking at `offset` while keeping the waveform
+    /// history. Used at a gapless track boundary: the audio never stopped, so
+    /// wiping the ring the way [`reset`](Self::reset) does would punch a hole
+    /// of silence through the visualizers exactly where the seam is.
+    pub fn rebase(&self, offset: Duration) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.samples_consumed = 0;
+            g.base_offset_secs = offset.as_secs_f64();
+        }
+    }
+
     /// Copy the most recent `n` mono-mixed samples into `out`. Returns the count copied.
     pub fn latest_mono(&self, out: &mut [f32]) -> usize {
         let g = match self.inner.lock() {

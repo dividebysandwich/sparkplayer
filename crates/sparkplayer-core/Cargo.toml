@@ -16,5 +16,5 @@ path = "src/lib.rs"
 # feature, the web crate gets its backend from ratzilla. Keeping default
 # features off keeps `sparkplayer-core` compilable for wasm32.
 ratatui = { version = "0.30", default-features = false }
-rustfft = "6.2"
+rustfft = "6.4"
 anyhow = "1.0"

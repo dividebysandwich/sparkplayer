@@ -20,6 +20,9 @@ pub struct Config {
     /// Repeat mode as a lowercase string: "off" | "all" | "one".
     pub repeat: String,
     pub shuffle: bool,
+    /// Whether to hand the next track to the audio backend early so playback
+    /// crosses the seam without a gap.
+    pub gapless: bool,
     /// The playlist as file paths, in order (native; object-URL playlists on
     /// web are ephemeral and not persisted).
     pub playlist: Vec<String>,
@@ -50,6 +53,7 @@ impl Default for Config {
             last_dir: None,
             repeat: "off".to_string(),
             shuffle: false,
+            gapless: true,
             playlist: Vec::new(),
             playing_index: None,
             position_secs: 0.0,
@@ -102,6 +106,7 @@ impl Config {
                     }
                 }
                 "shuffle" => cfg.shuffle = matches!(val, "true" | "1" | "on"),
+                "gapless" => cfg.gapless = matches!(val, "true" | "1" | "on"),
                 "playing_index" => cfg.playing_index = val.parse::<usize>().ok(),
                 "position_secs" => {
                     if let Ok(v) = val.parse::<f64>() {
@@ -144,6 +149,7 @@ impl Config {
         out.push_str(&format!("scroll_speed = {}\n", self.scroll_speed));
         out.push_str(&format!("repeat = \"{}\"\n", self.repeat));
         out.push_str(&format!("shuffle = {}\n", self.shuffle));
+        out.push_str(&format!("gapless = {}\n", self.gapless));
         if let Some(dir) = &self.last_dir {
             out.push_str(&format!("last_dir = \"{}\"\n", dir));
         }
@@ -182,6 +188,7 @@ mod tests {
             last_dir: Some("/home/me/Music".to_string()),
             repeat: "all".to_string(),
             shuffle: true,
+            gapless: false,
             playlist: vec![
                 "/home/me/Music/a.flac".to_string(),
                 "/home/me/Music/b.mp3".to_string(),
@@ -208,6 +215,7 @@ mod tests {
         assert_eq!(cfg.theme, "nord");
         assert_eq!(cfg.repeat, "off");
         assert!(!cfg.shuffle);
+        assert!(cfg.gapless);
         assert!(cfg.playlist.is_empty());
         assert_eq!(cfg.playing_index, None);
     }

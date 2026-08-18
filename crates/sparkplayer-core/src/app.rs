@@ -29,6 +29,13 @@ const MIN_AV_OFFSET_SECS: f64 = 0.050;
 const AV_OFFSET_SLEW_PER_TICK: f64 = 0.005;
 pub const AV_OFFSET_STEP_SECS: f64 = 0.025;
 
+/// How long before the end of a track its successor is handed to the audio
+/// backend. Long enough that opening the file and filling the decoder's first
+/// buffers is comfortably done before the seam — short enough that a skip or a
+/// playlist edit in the meantime is the common case, not the rare one, and the
+/// queue is simply rebuilt.
+const PRELOAD_LEAD_SECS: f64 = 15.0;
+
 /// Disagreement (seconds) between the smoothed video clock and the raw audio
 /// position that forces a hard resync. Must sit *above* one audio-buffer
 /// staircase step (hundreds of ms on high-latency backends) so the normal
@@ -98,6 +105,7 @@ pub enum EscapeMenuKind {
     VideoWindow,
     Repeat,
     Shuffle,
+    Gapless,
     Help,
     Github,
     Separator,
@@ -109,6 +117,16 @@ pub struct EscapeMenuItem {
     pub enabled: bool,
     pub label: &'static str,
     pub value: String,
+}
+
+/// Identifies the playlist entry queued for gapless playback. The locator rides
+/// along with the index because a shuffle or an edit can leave the index valid
+/// while pointing at a completely different track — comparing both is what
+/// makes the queue self-correcting.
+#[derive(Clone, PartialEq, Eq)]
+struct PreloadSlot {
+    index: usize,
+    locator: String,
 }
 
 /// Which slice of the library the global search overlay browses. `Tab` cycles
@@ -239,6 +257,16 @@ pub struct App {
 
     pub repeat: RepeatMode,
     pub shuffle: bool,
+    /// Whether the next track is handed to the audio backend early so playback
+    /// crosses the seam without a gap. See `maintain_preload`.
+    pub gapless: bool,
+
+    /// The playlist entry currently queued inside the audio backend, if any.
+    preloaded: Option<PreloadSlot>,
+    /// The entry we last offered to the backend, whether or not it took it.
+    /// Keeps a track that won't preload (a video, an unreadable file) from
+    /// being reopened on every tick.
+    preload_tried: Option<PreloadSlot>,
 
     /// Favorited track locators (paths). Toggled with `F`, persisted.
     pub favorites: HashSet<String>,
@@ -397,6 +425,9 @@ impl App {
                 _ => RepeatMode::Off,
             },
             shuffle: cfg.shuffle,
+            gapless: cfg.gapless,
+            preloaded: None,
+            preload_tried: None,
             favorites: cfg.favorites.iter().cloned().collect(),
             recent: cfg.recent.clone(),
             play_counts: cfg.play_counts.iter().cloned().collect(),
@@ -610,6 +641,9 @@ impl App {
         if idx >= self.tracks.len() {
             return Ok(());
         }
+        // Starting a track outright rebuilds the backend's playback chain, so
+        // whatever was queued behind the old one is gone.
+        self.drop_preload();
         let source = self.tracks[idx].source.clone();
         self.current_meta = self.library.read_metadata(&source);
         if self.current_meta.artwork.is_none() {
@@ -784,6 +818,14 @@ impl App {
     }
 
     pub fn check_advance(&mut self) -> Result<()> {
+        // A queued track takes over inside the audio backend the instant the
+        // previous one runs dry. Catch that edge first, so the title, art and
+        // progress bar follow the sound rather than lead it.
+        if let Some(started) = self.audio.take_started_track()
+            && let Some(slot) = self.preloaded.take()
+        {
+            self.adopt_started(slot, started.duration)?;
+        }
         if self.playing_index.is_some() && self.audio.is_finished() {
             match self.repeat {
                 RepeatMode::One => {
@@ -794,7 +836,134 @@ impl App {
                 _ => self.next_track()?,
             }
         }
+        self.maintain_preload();
         Ok(())
+    }
+
+    /// Which playlist entry follows the playing one — the same choice
+    /// [`check_advance`](Self::check_advance) makes when a track runs out.
+    /// `None` at the end of a playlist that isn't repeating.
+    fn upcoming_slot(&self) -> Option<PreloadSlot> {
+        let current = self.playing_index?;
+        let index = match self.repeat {
+            RepeatMode::One => current,
+            RepeatMode::All if current + 1 >= self.tracks.len() => 0,
+            _ if current + 1 < self.tracks.len() => current + 1,
+            _ => return None,
+        };
+        Some(PreloadSlot {
+            index,
+            locator: self.tracks.get(index)?.source.locator(),
+        })
+    }
+
+    /// Keep the backend's gapless queue aimed at whatever should play next.
+    /// Runs every tick: it arms the queue as the current track nears its end
+    /// and rebuilds it whenever the answer changes underneath — a skip, a
+    /// seek, a reshuffle, a different repeat mode, an edited playlist.
+    fn maintain_preload(&mut self) {
+        // A seek or a manual track change rebuilds the backend's playback
+        // chain and takes the queued track with it; notice and re-arm.
+        if self.preloaded.is_some() && !self.audio.has_preload() {
+            self.preloaded = None;
+            self.preload_tried = None;
+        }
+        let upcoming = if self.gapless {
+            self.upcoming_slot()
+        } else {
+            None
+        };
+        if self.preloaded.is_some() && self.preloaded != upcoming {
+            self.audio.clear_preload();
+            self.preloaded = None;
+        }
+        if self.preload_tried.is_some() && self.preload_tried != upcoming {
+            self.preload_tried = None;
+        }
+        let Some(slot) = upcoming else {
+            return;
+        };
+        if self.preloaded.is_some() || self.preload_tried.as_ref() == Some(&slot) {
+            return;
+        }
+        // Opening a second decoder is only worth it near the seam.
+        if let Some(total) = self.current_duration {
+            let remaining = total.saturating_sub(self.audio.position()).as_secs_f64();
+            if remaining > PRELOAD_LEAD_SECS {
+                return;
+            }
+        }
+        // Video is excluded at both ends: crossing into or out of one means
+        // rebuilding the picture pipeline and subtitles, which is exactly the
+        // work a gapless handover has to skip.
+        let playing_video = self
+            .playing_index
+            .and_then(|i| self.tracks.get(i))
+            .is_some_and(|t| library::is_video(&t.source));
+        if playing_video {
+            return;
+        }
+        let Some(next) = self.tracks.get(slot.index) else {
+            return;
+        };
+        if library::is_video(&next.source) {
+            return;
+        }
+        let source = next.source.clone();
+        match self.audio.preload_next(&source) {
+            Ok(true) => self.preloaded = Some(slot),
+            // Refused or unreadable. Remember it, or a file that will never
+            // preload gets reopened on every one of the ~30 ticks a second.
+            _ => self.preload_tried = Some(slot),
+        }
+    }
+
+    /// Bring the UI across to a track the backend has already started playing.
+    /// This is [`play_index`](Self::play_index) minus the handoff to the audio
+    /// backend — and minus the video/subtitle teardown, because only audio
+    /// tracks are ever queued this way and the last `play_index` cleared those.
+    fn adopt_started(&mut self, slot: PreloadSlot, duration_hint: Option<Duration>) -> Result<()> {
+        let matches = self
+            .tracks
+            .get(slot.index)
+            .is_some_and(|t| t.source.locator() == slot.locator);
+        if !matches {
+            // The playlist changed in the moment between the handover and this
+            // tick. Rare enough to just restart cleanly from the old position.
+            return self.next_track();
+        }
+        let source = self.tracks[slot.index].source.clone();
+        self.preload_tried = None;
+        self.current_meta = self.library.read_metadata(&source);
+        if self.current_meta.artwork.is_none() {
+            if let Some(bytes) = self.library.find_cover(&source) {
+                self.current_meta.artwork = Some(bytes);
+            }
+        }
+        self.current_duration = self.current_meta.duration.or(duration_hint);
+        self.playing_index = Some(slot.index);
+        self.playing_track = Some(source.clone());
+        self.selected = slot.index;
+        self.playlist_state.select(Some(slot.index));
+        self.status = format!("Playing: {}", self.tracks[slot.index].display);
+        self.note_play(&source);
+        self.refresh_album_art();
+        Ok(())
+    }
+
+    /// Forget the queued track, here and in the backend.
+    fn drop_preload(&mut self) {
+        self.audio.clear_preload();
+        self.preloaded = None;
+        self.preload_tried = None;
+    }
+
+    pub fn toggle_gapless(&mut self) {
+        self.gapless = !self.gapless;
+        if !self.gapless {
+            self.drop_preload();
+        }
+        self.status = format!("Gapless: {}", if self.gapless { "On" } else { "Off" });
     }
 
     pub fn seek_seconds(&mut self, delta: f64) {
@@ -1079,6 +1248,7 @@ impl App {
             last_dir: Some(self.browser_dir.to_string_lossy().to_string()),
             repeat: self.repeat.label().to_ascii_lowercase(),
             shuffle: self.shuffle,
+            gapless: self.gapless,
             playlist,
             playing_index: self.playing_index,
             position_secs: self.audio.position().as_secs_f64(),
@@ -1533,6 +1703,12 @@ impl App {
                 label: "Shuffle",
                 value: if self.shuffle { "On" } else { "Off" }.to_string(),
             },
+            EscapeMenuItem {
+                kind: EscapeMenuKind::Gapless,
+                enabled: true,
+                label: "Gapless",
+                value: if self.gapless { "On" } else { "Off" }.to_string(),
+            },
         ];
         items.push(EscapeMenuItem {
             kind: EscapeMenuKind::Help,
@@ -1631,6 +1807,7 @@ impl App {
             EscapeMenuKind::VideoWindow => self.toggle_video_window(),
             EscapeMenuKind::Repeat => self.cycle_repeat(),
             EscapeMenuKind::Shuffle => self.toggle_shuffle(),
+            EscapeMenuKind::Gapless => self.toggle_gapless(),
             EscapeMenuKind::Help
             | EscapeMenuKind::Github
             | EscapeMenuKind::Quit
@@ -1667,6 +1844,7 @@ impl App {
             EscapeMenuKind::VideoWindow => self.toggle_video_window(),
             EscapeMenuKind::Repeat => self.cycle_repeat(),
             EscapeMenuKind::Shuffle => self.toggle_shuffle(),
+            EscapeMenuKind::Gapless => self.toggle_gapless(),
             EscapeMenuKind::AvOffset => self.reset_av_offset_auto(),
             _ => {}
         }

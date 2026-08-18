@@ -170,7 +170,7 @@ jobs:
           # Use the stable "latest release" URL, NOT a version-pinned one: gyan.dev
           # prunes old versioned packages from /packages/ on every release, which
           # repeatedly 404s this step. The soname-versioned DLL names
-          # (avcodec-62.dll, avutil-60.dll, ...) are stable within an FFmpeg major
+          # (avcodec-63.dll, avutil-61.dll, ...) are stable within an FFmpeg major
           # series and are hard-coded in wix/main.wxs; a major bump changes them,
           # and the check below fails loudly with the actual names when it does.
           $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z'
@@ -179,7 +179,7 @@ jobs:
           $root = (Get-ChildItem ffmpeg-dist -Directory | Select-Object -First 1).FullName
           # Fail early (with the actual names) if the DLL sonames drift from what
           # wix/main.wxs bundles, rather than a cryptic failure at the MSI step.
-          $expected = 'avcodec-62.dll','avformat-62.dll','avutil-60.dll','swresample-6.dll','swscale-9.dll'
+          $expected = 'avcodec-63.dll','avformat-63.dll','avutil-61.dll','swresample-7.dll','swscale-10.dll'
           $have = (Get-ChildItem "$root\bin" -Filter *.dll).Name
           $missing = $expected | Where-Object { $_ -notin $have }
           if ($missing) {

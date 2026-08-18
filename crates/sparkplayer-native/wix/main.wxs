@@ -11,11 +11,12 @@
   message"). The .zip already bundles these DLLs; this makes the MSI do the
   same.
 
-  The soname-versioned FFmpeg DLL names below (avcodec-62, avutil-60, ...)
-  match the FFmpeg build pinned in .github/workflows/release.yml
-  (gyan.dev ffmpeg-8.1.1 full_build-shared, LGPL). If that pin is bumped to a
-  new FFmpeg major version, update these names to match the new sonames or the
-  WiX build will fail on the missing source files.
+  The soname-versioned FFmpeg DLL names below (avcodec-63, avutil-61, ...) match
+  the FFmpeg build .github/workflows/release.yml downloads (gyan.dev
+  ffmpeg-release-full-shared, FFmpeg 9.x, LGPL). When that build moves to a new
+  FFmpeg major version these names have to move with it, or the WiX step fails
+  on missing source files — the workflow's soname check trips first and prints
+  the names it actually found.
 
   Only the libraries SparkPlayer actually links are bundled (codec, format,
   util, software-resampling, software-scaling + SDL2); avfilter/avdevice are
@@ -65,24 +66,24 @@
 
                     <!-- FFmpeg 8.1.1 (gyan.dev full-shared, LGPL) runtime libraries. -->
                     <Component Id="dll_avcodec" Guid="*">
-                        <File Id="avcodec" Name="avcodec-62.dll" DiskId="1"
-                              Source="$(var.CargoTargetBinDir)\avcodec-62.dll" KeyPath="yes" />
+                        <File Id="avcodec" Name="avcodec-63.dll" DiskId="1"
+                              Source="$(var.CargoTargetBinDir)\avcodec-63.dll" KeyPath="yes" />
                     </Component>
                     <Component Id="dll_avformat" Guid="*">
-                        <File Id="avformat" Name="avformat-62.dll" DiskId="1"
-                              Source="$(var.CargoTargetBinDir)\avformat-62.dll" KeyPath="yes" />
+                        <File Id="avformat" Name="avformat-63.dll" DiskId="1"
+                              Source="$(var.CargoTargetBinDir)\avformat-63.dll" KeyPath="yes" />
                     </Component>
                     <Component Id="dll_avutil" Guid="*">
-                        <File Id="avutil" Name="avutil-60.dll" DiskId="1"
-                              Source="$(var.CargoTargetBinDir)\avutil-60.dll" KeyPath="yes" />
+                        <File Id="avutil" Name="avutil-61.dll" DiskId="1"
+                              Source="$(var.CargoTargetBinDir)\avutil-61.dll" KeyPath="yes" />
                     </Component>
                     <Component Id="dll_swresample" Guid="*">
-                        <File Id="swresample" Name="swresample-6.dll" DiskId="1"
-                              Source="$(var.CargoTargetBinDir)\swresample-6.dll" KeyPath="yes" />
+                        <File Id="swresample" Name="swresample-7.dll" DiskId="1"
+                              Source="$(var.CargoTargetBinDir)\swresample-7.dll" KeyPath="yes" />
                     </Component>
                     <Component Id="dll_swscale" Guid="*">
-                        <File Id="swscale" Name="swscale-9.dll" DiskId="1"
-                              Source="$(var.CargoTargetBinDir)\swscale-9.dll" KeyPath="yes" />
+                        <File Id="swscale" Name="swscale-10.dll" DiskId="1"
+                              Source="$(var.CargoTargetBinDir)\swscale-10.dll" KeyPath="yes" />
                     </Component>
 
                     <!-- SDL2 2.32.4 (zlib) runtime, used by the video window. -->

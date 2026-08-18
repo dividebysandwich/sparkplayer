@@ -74,9 +74,22 @@ large library; `Esc` clears the filter. Curate the playlist in place with `d`
 
 Launched with no arguments, SparkPlayer reopens where you left off: the same
 browser directory and playlist, the track and position that were playing, and
-your repeat/shuffle modes. Pass a path explicitly to start fresh from it
+your repeat/shuffle/gapless modes. Pass a path explicitly to start fresh from it
 instead. (In the browser build, settings and repeat/shuffle persist via
 `localStorage`; locally-picked files can't be restored across reloads.)
+
+### Gapless playback
+
+Between two audio tracks SparkPlayer hands the next one to the audio device
+before the current one runs out, so albums that were mastered to run together —
+live recordings, DJ sets, anything that fades one track into the next — play
+without the pause that opening the next file would otherwise cost. The queued
+track is converted to the playing track's format up front, so a playlist that
+mixes sample rates stays gapless too.
+
+It is on by default and toggled from the `Esc` menu (*Gapless*); the setting is
+remembered between runs. Video is always started the normal way, since its
+picture pipeline and subtitles have to be rebuilt at the boundary anyway.
 
 ### Album art
 
@@ -237,7 +250,7 @@ prebuilt libraries with a few environment variables (this is exactly what CI
 does in `.github/workflows/release.yml`). One-time setup:
 
 1. **FFmpeg shared dev build** — download
-   [`ffmpeg-8.1.1-full_build-shared.7z`](https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.1-full_build-shared.7z)
+   [`ffmpeg-9.0.1-full_build-shared.7z`](https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-full_build-shared.7z)
    from gyan.dev (LGPL) and extract it somewhere, e.g.
    `C:\dev\ffmpeg`. The extracted folder must contain `include\`, `lib\` and
    `bin\`. Pin this exact version — the bundled DLL names are
@@ -254,7 +267,7 @@ Then set the environment variables and build (PowerShell). Adjust the paths to
 where you extracted each archive:
 
 ```powershell
-$env:FFMPEG_DIR   = "C:\dev\ffmpeg\ffmpeg-8.1.1-full_build-shared"
+$env:FFMPEG_DIR   = "C:\dev\ffmpeg\ffmpeg-9.0.1-full_build-shared"
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 $env:LIB          = "C:\dev\SDL2\SDL2-2.32.4\lib\x64;$env:LIB"
 

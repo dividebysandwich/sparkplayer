@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -11,10 +13,10 @@ use ffmpeg::media::Type as MediaType;
 use ffmpeg::software::resampling::Context as Resampler;
 use ffmpeg::util::frame::audio::Audio;
 use ffmpeg::ChannelLayout;
-use rodio::source::Source;
+use rodio::source::{Source, UniformSourceIterator};
 use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate};
 
-use sparkplayer_core::backend::AudioBackend;
+use sparkplayer_core::backend::{AudioBackend, StartedTrack};
 use sparkplayer_core::library;
 use sparkplayer_core::{SampleBuffer, TrackRef};
 
@@ -273,18 +275,65 @@ impl Source for FfmpegAudioSource {
     }
 }
 
+/// Shared handshake between a gaplessly queued source and the [`AudioPlayer`]
+/// that queued it. rodio's queue polls the next source only once the current
+/// one runs dry, so `started` flipping *is* the track boundary — observed on
+/// the playback thread, read on the UI thread.
+#[derive(Default)]
+struct Handover {
+    /// Set by the queued source the first time it feeds the output.
+    started: AtomicBool,
+    /// Set by the player to drop a queue that is no longer wanted. A source
+    /// already in rodio's queue can't be pulled back out, so it yields nothing
+    /// instead and the queue moves straight past it.
+    cancelled: AtomicBool,
+}
+
+/// What a queued source applies to the tap when it takes over: the new track's
+/// format, plus the handshake to signal through.
+struct Takeover {
+    channels: u16,
+    sample_rate: u32,
+    handover: Arc<Handover>,
+}
+
 struct TapSource<S> {
     inner: S,
     tap: SampleBuffer,
+    /// `Some` only for a source queued behind another, until the moment it
+    /// starts playing. A source that plays immediately configures the tap up
+    /// front and leaves this `None`.
+    takeover: Option<Takeover>,
 }
 
 impl<S> TapSource<S>
 where
     S: Source<Item = f32>,
 {
+    /// Wrap a source that starts playing right away.
     fn new(inner: S, tap: SampleBuffer) -> Self {
         tap.set_format(inner.channels().get(), inner.sample_rate().get());
-        Self { inner, tap }
+        Self {
+            inner,
+            tap,
+            takeover: None,
+        }
+    }
+
+    /// Wrap a source queued behind the playing one. The tap is left alone until
+    /// this source actually reaches the output — retuning it any earlier would
+    /// corrupt the position and visualizers of the track still playing.
+    fn queued(inner: S, tap: SampleBuffer, handover: Arc<Handover>) -> Self {
+        let takeover = Takeover {
+            channels: inner.channels().get(),
+            sample_rate: inner.sample_rate().get(),
+            handover,
+        };
+        Self {
+            inner,
+            tap,
+            takeover: Some(takeover),
+        }
     }
 }
 
@@ -294,7 +343,21 @@ where
 {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
+        if let Some(t) = &self.takeover
+            && t.handover.cancelled.load(Ordering::Acquire)
+        {
+            return None;
+        }
         let v = self.inner.next()?;
+        if let Some(t) = self.takeover.take() {
+            // First sample of a queued track: hand the tap over. `rebase`
+            // rather than `reset` — the samples already in the ring are the
+            // tail of the previous track, and keeping them is what makes the
+            // visualizers flow through the seam.
+            self.tap.set_format(t.channels, t.sample_rate);
+            self.tap.rebase(Duration::ZERO);
+            t.handover.started.store(true, Ordering::Release);
+        }
         self.tap.push(v);
         Some(v)
     }
@@ -324,6 +387,17 @@ fn open_input(path: &Path) -> Result<ffmpeg::format::context::Input> {
     ffmpeg::init().ok();
     ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Fatal);
     ffmpeg::format::input(&path.to_path_buf()).with_context(|| format!("opening {}", path.display()))
+}
+
+/// Open a plain audio file through rodio's symphonia decoder, returning the
+/// boxed source and its duration hint. Shared by immediate playback and by the
+/// gapless preload so the two can't drift apart.
+fn open_audio_source(path: &Path) -> Result<(Box<dyn Source + Send>, Option<Duration>)> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let source = Decoder::new(BufReader::new(file))
+        .with_context(|| format!("decoding {}", path.display()))?;
+    let duration = source.total_duration();
+    Ok((Box::new(source), duration))
 }
 
 /// One selectable audio track inside a container, paired with the ffmpeg
@@ -407,6 +481,14 @@ fn channel_desc(stream: &ffmpeg::format::stream::Stream<'_>) -> Option<String> {
     })
 }
 
+/// A track already decoded-ready and sitting in rodio's queue behind the
+/// playing one, waiting to take over without a gap.
+struct Preloaded {
+    path: PathBuf,
+    duration: Option<Duration>,
+    handover: Arc<Handover>,
+}
+
 pub struct AudioPlayer {
     sink: MixerDeviceSink,
     player: Player,
@@ -417,6 +499,8 @@ pub struct AudioPlayer {
     audio_tracks: Vec<AudioTrackInfo>,
     /// Index into `audio_tracks` of the track currently being decoded.
     active_audio_track: usize,
+    /// The gaplessly queued next track, if one is armed.
+    preloaded: Option<Preloaded>,
 }
 
 impl AudioPlayer {
@@ -434,6 +518,7 @@ impl AudioPlayer {
             current_path: None,
             audio_tracks: Vec::new(),
             active_audio_track: 0,
+            preloaded: None,
         })
     }
 
@@ -447,9 +532,7 @@ impl AudioPlayer {
     }
 
     pub fn play_file(&mut self, path: &Path) -> Result<Option<Duration>> {
-        self.player.stop();
-        self.player = Player::connect_new(self.sink.mixer());
-        self.player.set_volume(self.volume);
+        self.rebuild_player();
         self.tap.reset();
         self.current_path = Some(path.to_path_buf());
         self.audio_tracks.clear();
@@ -465,12 +548,8 @@ impl AudioPlayer {
             self.player.append(tapped);
             total
         } else {
-            let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-            let source = Decoder::new(BufReader::new(file))
-                .with_context(|| format!("decoding {}", path.display()))?;
-            let total = source.total_duration();
-            let tapped = TapSource::new(source, self.tap.clone());
-            self.player.append(tapped);
+            let (source, total) = open_audio_source(path)?;
+            self.player.append(TapSource::new(source, self.tap.clone()));
             total
         };
         self.player.play();
@@ -479,9 +558,7 @@ impl AudioPlayer {
 
     fn seek_to(&mut self, path: &Path, target: Duration) -> Result<()> {
         let was_paused = self.player.is_paused();
-        self.player.stop();
-        self.player = Player::connect_new(self.sink.mixer());
-        self.player.set_volume(self.volume);
+        self.rebuild_player();
 
         self.tap.reset();
         self.tap.set_base_offset(target);
@@ -531,9 +608,7 @@ impl AudioPlayer {
         self.active_audio_track = idx;
         let target = self.tap.position();
         let was_paused = self.player.is_paused();
-        self.player.stop();
-        self.player = Player::connect_new(self.sink.mixer());
-        self.player.set_volume(self.volume);
+        self.rebuild_player();
         self.tap.reset();
         self.tap.set_base_offset(target);
 
@@ -548,6 +623,79 @@ impl AudioPlayer {
             self.player.play();
         }
         Ok(())
+    }
+
+    /// Tear the playback chain down and start a fresh one. Everything queued —
+    /// the playing track and any gapless preload behind it — goes with it, so
+    /// callers that rebuild must re-arm the preload afterwards.
+    fn rebuild_player(&mut self) {
+        self.cancel_preload();
+        self.player.stop();
+        self.player = Player::connect_new(self.sink.mixer());
+        self.player.set_volume(self.volume);
+    }
+
+    /// Drop the queued track. It is already inside rodio's queue and can't be
+    /// taken back out, so it is flagged instead: it yields nothing when the
+    /// queue reaches it, and playback moves straight past.
+    fn cancel_preload(&mut self) {
+        if let Some(p) = self.preloaded.take() {
+            p.handover.cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    /// Queue `path` to start the instant the current track ends.
+    ///
+    /// Only plain audio files are queued: a video needs its picture pipeline
+    /// and subtitles rebuilt at the boundary, which is exactly the stop-and-open
+    /// work gapless playback exists to avoid, so those keep the normal path.
+    fn preload(&mut self, path: &Path) -> Result<bool> {
+        let playing_video = self
+            .current_path
+            .as_deref()
+            .is_some_and(library::is_video_file);
+        if self.current_path.is_none() || playing_video || self.preloaded.is_some() {
+            return Ok(false);
+        }
+        if library::is_video_file(path) {
+            return Ok(false);
+        }
+        let (source, duration) = open_audio_source(path)?;
+        let source = self.match_playing_format(source);
+        let handover = Arc::new(Handover::default());
+        self.player.append(TapSource::queued(
+            source,
+            self.tap.clone(),
+            handover.clone(),
+        ));
+        self.preloaded = Some(Preloaded {
+            path: path.to_path_buf(),
+            duration,
+            handover,
+        });
+        Ok(true)
+    }
+
+    /// Present `source` in the format of the track already playing, converting
+    /// it first if they differ.
+    ///
+    /// rodio's mixer builds its resampler from whatever was playing when the
+    /// chain was set up and doesn't fully re-derive it when a queued source
+    /// takes over, so a track at another sample rate comes out at the wrong
+    /// speed — measurably so: 8 kHz behind 44.1 kHz plays in half its length.
+    /// Converting up front means the mixer only ever sees one continuous
+    /// stream, which is what gapless playback is asking of it anyway.
+    fn match_playing_format(&self, source: Box<dyn Source + Send>) -> Box<dyn Source + Send> {
+        let (Some(channels), Some(rate)) = (
+            ChannelCount::new(self.tap.channels()),
+            SampleRate::new(self.tap.sample_rate()),
+        ) else {
+            return source;
+        };
+        if source.channels() == channels && source.sample_rate() == rate {
+            return source;
+        }
+        Box::new(UniformSourceIterator::new(source, channels, rate))
     }
 
     /// Best-effort audio output latency from the negotiated CPAL buffer.
@@ -590,6 +738,7 @@ impl AudioBackend for AudioPlayer {
     }
 
     fn stop(&mut self) {
+        self.cancel_preload();
         self.player.stop();
         self.tap.reset();
         self.current_path = None;
@@ -646,11 +795,299 @@ impl AudioBackend for AudioPlayer {
     fn set_audio_track(&mut self, idx: usize) -> Result<()> {
         AudioPlayer::set_audio_track(self, idx)
     }
+
+    fn preload_next(&mut self, source: &TrackRef) -> Result<bool> {
+        match source {
+            TrackRef::Path(p) => self.preload(p),
+            TrackRef::Url(..) => Ok(false),
+        }
+    }
+
+    fn has_preload(&self) -> bool {
+        self.preloaded.is_some()
+    }
+
+    fn clear_preload(&mut self) {
+        AudioPlayer::cancel_preload(self);
+    }
+
+    fn take_started_track(&mut self) -> Option<StartedTrack> {
+        let started = self
+            .preloaded
+            .as_ref()?
+            .handover
+            .started
+            .load(Ordering::Acquire);
+        if !started {
+            return None;
+        }
+        let preloaded = self.preloaded.take()?;
+        self.current_path = Some(preloaded.path);
+        // Preloading is audio-only, so the new file has no selectable video
+        // audio tracks to carry over.
+        self.audio_tracks.clear();
+        self.active_audio_track = 0;
+        Some(StartedTrack {
+            duration: preloaded.duration,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rodio::buffer::SamplesBuffer;
+
+    /// A queued track's stand-in: four samples of a format deliberately unlike
+    /// the "previous track" the tap is left holding.
+    fn queued_buffer() -> SamplesBuffer {
+        SamplesBuffer::new(
+            ChannelCount::new(1).unwrap(),
+            SampleRate::new(8_000).unwrap(),
+            vec![0.25f32; 4],
+        )
+    }
+
+    /// Leave the tap looking like a stereo 44.1 kHz track has been playing for
+    /// a while, which is what a queued source has to take over from.
+    fn tap_mid_track() -> SampleBuffer {
+        let tap = SampleBuffer::new();
+        tap.set_format(2, 44_100);
+        for _ in 0..44_100 {
+            tap.push(0.5);
+        }
+        tap
+    }
+
+    #[test]
+    fn queued_source_takes_the_tap_over_on_its_first_sample() {
+        let tap = tap_mid_track();
+        let handover = Arc::new(Handover::default());
+        let mut source = TapSource::queued(queued_buffer(), tap.clone(), handover.clone());
+
+        // Constructing it must not disturb the track still playing: rodio holds
+        // the source in its queue for as long as that one keeps producing.
+        assert_eq!(tap.sample_rate(), 44_100);
+        assert_eq!(tap.channels(), 2);
+        assert!(!handover.started.load(Ordering::Acquire));
+        let mid_track_pos = tap.position();
+        assert!(mid_track_pos > Duration::from_millis(400));
+
+        assert_eq!(source.next(), Some(0.25));
+
+        // The first sample is the boundary: format and position follow it.
+        assert!(handover.started.load(Ordering::Acquire));
+        assert_eq!(tap.sample_rate(), 8_000);
+        assert_eq!(tap.channels(), 1);
+        assert!(tap.position() < Duration::from_millis(1));
+
+        // ...but the waveform history survives, so the visualizers flow through
+        // the seam instead of blinking to silence.
+        let mut window = [0.0f32; 64];
+        assert_eq!(tap.latest_mono(&mut window), 64);
+        assert!(window.iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn cancelled_queue_yields_nothing_and_leaves_the_tap_alone() {
+        let tap = tap_mid_track();
+        let handover = Arc::new(Handover::default());
+        let mut source = TapSource::queued(queued_buffer(), tap.clone(), handover.clone());
+        let mid_track_pos = tap.position();
+
+        handover.cancelled.store(true, Ordering::Release);
+
+        // Ending immediately is how a queued track is un-queued: rodio can't be
+        // asked to drop it, so it plays nothing and the queue moves straight on.
+        assert_eq!(source.next(), None);
+        assert!(!handover.started.load(Ordering::Acquire));
+        assert_eq!(tap.sample_rate(), 44_100);
+        assert_eq!(tap.position(), mid_track_pos);
+    }
+
+    #[test]
+    fn immediately_playing_source_configures_the_tap_up_front() {
+        let tap = tap_mid_track();
+        let mut source = TapSource::new(queued_buffer(), tap.clone());
+        // No handover to wait for — this one is the track being started.
+        assert_eq!(tap.sample_rate(), 8_000);
+        assert_eq!(source.next(), Some(0.25));
+    }
+
+    /// Write a mono 16-bit PCM WAV holding a constant `value` — a flat signal
+    /// makes any inserted silence, and the exact seam between two tracks,
+    /// unmistakable in the mixed output.
+    fn write_dc_wav(name: &str, rate: u32, secs: f32, value: f32) -> PathBuf {
+        let frames = (rate as f32 * secs) as u32;
+        let data_len = frames * 2;
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        for _ in 0..frames {
+            out.extend_from_slice(&((value * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, out).unwrap();
+        path
+    }
+
+    /// Write a mono 16-bit PCM WAV of `secs` seconds at `rate` into the temp
+    /// dir. Hand-rolled so the test needs no fixtures and no external tools.
+    fn write_wav(name: &str, rate: u32, secs: f32) -> PathBuf {
+        let frames = (rate as f32 * secs) as u32;
+        let data_len = frames * 2;
+        let mut out: Vec<u8> = Vec::with_capacity(44 + data_len as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // mono
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
+        out.extend_from_slice(&2u16.to_le_bytes()); // block align
+        out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..frames {
+            let t = i as f32 / rate as f32;
+            let v = (t * 440.0 * std::f32::consts::TAU).sin() * 0.2;
+            out.extend_from_slice(&((v * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, out).expect("writing test wav");
+        path
+    }
+
+    /// Play `first` then `second` through one rodio queue and the same
+    /// conversion the mixer applies, returning the mixed 44.1 kHz stereo
+    /// output. This is the real signal path minus the sound card.
+    fn mix_two_tracks(first: &Path, second: &Path, samples: usize) -> Vec<f32> {
+        let tap = SampleBuffer::new();
+        let (player, queue) = Player::new();
+        let (a, _) = open_audio_source(first).expect("opening the first track");
+        let (b, _) = open_audio_source(second).expect("opening the second track");
+        let (channels, rate) = (a.channels(), a.sample_rate());
+        player.append(TapSource::new(a, tap.clone()));
+        let b: Box<dyn Source + Send> = if b.channels() == channels && b.sample_rate() == rate {
+            b
+        } else {
+            Box::new(UniformSourceIterator::new(b, channels, rate))
+        };
+        player.append(TapSource::queued(b, tap, Arc::new(Handover::default())));
+        let mut mixed = UniformSourceIterator::new(
+            queue,
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(44_100).unwrap(),
+        );
+        (0..samples).map(|_| mixed.next().unwrap_or(0.0)).collect()
+    }
+
+    /// The property the whole feature is named after, measured on the mixed
+    /// output: the second track starts on the sample after the first one ends,
+    /// with no silence anywhere in between — and it plays at its true length,
+    /// whatever sample rate it was recorded at.
+    #[test]
+    fn queued_track_follows_the_first_with_no_silence_between_them() {
+        // 0.1 s per track = 4410 output frames = 8820 interleaved samples each.
+        const PER_TRACK: usize = 8_820;
+        // Resampling either end costs a handful of samples at the edges.
+        const TOLERANCE: usize = 64;
+
+        for rate in [44_100u32, 22_050, 48_000, 96_000, 8_000] {
+            let first = write_dc_wav("sparkplayer-seam-a.wav", 44_100, 0.1, 0.5);
+            let second = write_dc_wav("sparkplayer-seam-b.wav", rate, 0.1, -0.7);
+            let out = mix_two_tracks(&first, &second, 44_100);
+            let _ = std::fs::remove_file(&first);
+            let _ = std::fs::remove_file(&second);
+
+            // The first negative sample is the first sample of track two.
+            let seam = out
+                .iter()
+                .position(|&v| v < -0.3)
+                .unwrap_or_else(|| panic!("{rate} Hz: the second track never played"));
+            let end = out.iter().rposition(|&v| v.abs() > 0.3).unwrap();
+
+            assert!(
+                seam.abs_diff(PER_TRACK) <= TOLERANCE,
+                "{rate} Hz: the seam landed at {seam}, not {PER_TRACK}"
+            );
+            assert!(
+                end.abs_diff(2 * PER_TRACK) <= TOLERANCE,
+                "{rate} Hz: playback ran to {end}, not {}: the queued track was \
+                 resampled at the wrong ratio",
+                2 * PER_TRACK
+            );
+            // Nothing quiet anywhere before the end: no gap, no drop-out.
+            let quiet = out[..end].iter().filter(|v| v.abs() < 0.05).count();
+            assert!(
+                quiet <= TOLERANCE,
+                "{rate} Hz: {quiet} silent samples mid-stream"
+            );
+        }
+    }
+
+    /// The end-to-end property gapless playback rests on: rodio picks the
+    /// queued source up in the same callback the previous one runs dry, so the
+    /// handover needs no restart of the playback chain — and the tap retunes to
+    /// the new track's format at exactly that moment.
+    ///
+    /// Skipped when no audio device can be opened (headless CI). Runs silent:
+    /// rodio applies volume downstream of the tap, so muting the output leaves
+    /// the samples this asserts on untouched.
+    #[test]
+    fn preloaded_track_takes_over_the_output_when_the_first_ends() {
+        let Ok(mut player) = AudioPlayer::new() else {
+            eprintln!("skipping: no audio output device");
+            return;
+        };
+        let first = write_wav("sparkplayer-gapless-a.wav", 22_050, 0.4);
+        let second = write_wav("sparkplayer-gapless-b.wav", 8_000, 0.4);
+
+        player.set_volume(0.0);
+        player.play_file(&first).expect("playing the first track");
+        assert!(player.preload(&second).expect("queueing the second track"));
+        assert!(player.has_preload());
+        assert_eq!(player.current_path.as_deref(), Some(first.as_path()));
+
+        let mut started = None;
+        for _ in 0..500 {
+            if let Some(s) = player.take_started_track() {
+                started = Some(s);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let started = started.expect("the queued track never took over");
+        assert_eq!(player.current_path.as_deref(), Some(second.as_path()));
+        assert!(!player.has_preload());
+        assert!(!player.is_finished(), "playback stopped at the seam");
+        // The duration hint travels with the handover so the UI can fill the
+        // progress bar in without reopening the file.
+        let hint = started
+            .duration
+            .expect("no duration hint for the queued track");
+        assert!(hint > Duration::from_millis(300) && hint < Duration::from_millis(500));
+        // The second track was recorded at 8 kHz but is presented in the
+        // playing track's format, so the mixer sees one unbroken stream.
+        assert_eq!(player.tap.sample_rate(), 22_050);
+        // Position restarts with the new track rather than carrying on.
+        assert!(player.tap.position() < Duration::from_millis(400));
+
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
 
     /// The 1 GB sample lives at the repo root; tests run from the crate dir.
     fn sample() -> std::path::PathBuf {
