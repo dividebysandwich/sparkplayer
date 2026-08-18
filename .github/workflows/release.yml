@@ -111,7 +111,17 @@ jobs:
           # Tell bindgen which arch we are targeting so it loads the right
           # libavutil/avconfig.h from /usr/include/<triple>/.
           BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu: "--target=aarch64-linux-gnu -I/usr/include/aarch64-linux-gnu"
-          BINDGEN_EXTRA_CLANG_ARGS_armv7_unknown_linux_gnueabihf: "--target=arm-linux-gnueabihf -I/usr/include/arm-linux-gnueabihf"
+          # The trailing -D disables C static assertions while bindgen parses
+          # headers, which is needed on 32-bit only. ffmpeg-sys-next 9.0's
+          # Vulkan shim (hwcontext_stubs/vulkan/vulkan.h) asserts
+          # sizeof(VkPhysicalDeviceFeatures2) == 240 — true for a 64-bit
+          # pointer, but the struct is 228 bytes on armv7, so bindgen aborts.
+          # The shim's *layout* is right for 32-bit (it matches the real
+          # Vulkan header there); only the hard-coded constant is wrong, so
+          # the generated bindings are unaffected. Assertions are compile-time
+          # checks in headers bindgen only reads, never compiles. Drop this
+          # once ffmpeg-sys-next makes that assertion pointer-width aware.
+          BINDGEN_EXTRA_CLANG_ARGS_armv7_unknown_linux_gnueabihf: "--target=arm-linux-gnueabihf -I/usr/include/arm-linux-gnueabihf -D_Static_assert(c,m)="
         run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Install cargo-deb

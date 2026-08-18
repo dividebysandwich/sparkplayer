@@ -15,6 +15,13 @@ path = "src/lib.rs"
 # No terminal backend here — the native crate enables ratatui's `crossterm`
 # feature, the web crate gets its backend from ratzilla. Keeping default
 # features off keeps `sparkplayer-core` compilable for wasm32.
-ratatui = { version = "0.30", default-features = false }
+#
+# `std` is requested explicitly: it is not one of ratatui's defaults, and
+# without it ratatui-core's layout cache is guarded by `critical-section`
+# instead of a thread-local — which needs an implementation the final binary
+# has to pick, and wasm32 has none, so the link fails on
+# `_critical_section_1_0_acquire`. The native build already gets `std` pulled
+# in by ratatui-image; this makes both builds agree.
+ratatui = { version = "0.30", default-features = false, features = ["std"] }
 rustfft = "6.4"
 anyhow = "1.0"
