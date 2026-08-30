@@ -674,6 +674,8 @@ impl App {
                 if library::is_video(&source) {
                     self.video.open(&source);
                     self.subtitles = self.library.load_subtitles(&source);
+                } else {
+                    self.subtitles = self.library.load_lyrics(&source);
                 }
             }
             Err(e) => {
@@ -732,6 +734,48 @@ impl App {
     /// Drive video display: select the current subtitle cue and hand the
     /// display position to the video backend, then fold the backend's reported
     /// render time into the auto A/V offset (native only; web returns `None`).
+
+    fn tick_subtitles(&mut self, pos_secs: f64) {
+        // Lyrics have exactly one "track" and no reason to start off.
+        if !self.video.is_loaded()
+            && self.active_subtitle_track.is_none()
+            && self.subtitles.track_count() > 0
+            {
+                self.active_subtitle_track = Some(0);
+            }
+            self.current_subtitle_text = self
+            .active_subtitle_track
+            .and_then(|i| self.subtitles.cue_at(i, pos_secs));
+        let count = self.subtitles.track_count();
+        if count > self.last_subtitle_track_count && self.last_subtitle_track_count == 0 {
+            self.subtitle_announcement_until = Some(self.clock_secs + 5.0);
+        }
+        self.last_subtitle_track_count = count;
+        if !self.preferred_subtitle_applied && self.preferred_subtitle_lang.is_some() && count > 0 {
+            let lang = self.preferred_subtitle_lang.clone().unwrap();
+            if let Some(idx) = self.subtitles.find_track_by_language(&lang) {
+                self.active_subtitle_track = Some(idx);
+                self.current_subtitle_text = None;
+                self.status = format!(
+                    "Subtitles: {}",
+                    self.subtitles.track_label(idx).unwrap_or_else(|| format!("Track {}", idx + 1))
+                );
+                self.preferred_subtitle_applied = true;
+            }
+        }
+    }
+
+    /// Drive the lyrics cue for audio-only tracks. Unlike video, there's no
+    /// picture to sync to, so this runs off the raw audio position directly
+    /// rather than the smoothed video clock `tick_video` uses.
+    pub fn tick_lyrics(&mut self) {
+        if self.video.is_loaded() || self.subtitles.track_count() == 0 {
+            return;
+        }
+        let pos = self.position().as_secs_f64();
+        self.tick_subtitles(pos);
+    }
+
     pub fn tick_video(&mut self) {
         if !self.video.is_loaded() {
             return;
@@ -1595,19 +1639,28 @@ impl App {
     /// skips over them.
     pub fn escape_menu_items(&self) -> Vec<EscapeMenuItem> {
         let has_video = self.video.is_loaded();
-        let sub_label = if !has_video {
-            "—".to_string()
-        } else if self.subtitles.track_count() == 0 {
-            "None".to_string()
-        } else {
-            match self.active_subtitle_track {
-                Some(i) => self
+        let has_lyrics = !has_video && self.subtitles.track_count() > 0;
+        let sub_label = if has_video {
+            if self.subtitles.track_count() == 0 {
+                "None".to_string()
+            } else {
+                match self.active_subtitle_track {
+                    Some(i) => self
                     .subtitles
                     .track_label(i)
                     .unwrap_or_else(|| format!("Track {}", i + 1)),
+                    None => "Off".to_string(),
+                }
+            }
+        } else if has_lyrics {
+            match self.active_subtitle_track {
+                Some(_) => "On".to_string(),
                 None => "Off".to_string(),
             }
+        } else {
+            "—".to_string()
         };
+        let sub_row_label: &'static str = if has_video { "Subtitle" } else { "Lyrics" };
         let av_label = if !has_video {
             "—".to_string()
         } else if self.auto_av_offset {
@@ -1640,8 +1693,8 @@ impl App {
             },
             EscapeMenuItem {
                 kind: EscapeMenuKind::Subtitle,
-                enabled: has_video && self.subtitles.track_count() > 0,
-                label: "Subtitle",
+                enabled: (has_video && self.subtitles.track_count() > 0) || has_lyrics,
+                label: sub_row_label,
                 value: sub_label,
             },
             EscapeMenuItem {

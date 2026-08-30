@@ -47,6 +47,13 @@ impl MediaLibrary for NativeLibrary {
         entries
     }
 
+    fn load_lyrics(&self, source: &TrackRef) -> SubtitleSet {
+        match source {
+            TrackRef::Path(p) => subtitles_native::load_for_audio(p),
+            TrackRef::Url(..) => SubtitleSet::default(),
+        }
+    }
+
     fn load_playlist(&self, source: &TrackRef) -> Result<Vec<Track>> {
         match source {
             TrackRef::Path(p) => load_playlist(p),
