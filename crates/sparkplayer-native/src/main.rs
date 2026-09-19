@@ -4,6 +4,7 @@ mod external_window;
 mod library_native;
 mod media_controls;
 mod metadata_native;
+mod shared_audio;
 mod subtitles_native;
 mod video;
 
@@ -33,10 +34,11 @@ use sparkplayer_core::{App, ui};
 
 use crate::audio::AudioPlayer;
 use crate::backends::{
-    build_picker, GraphicsChoice, NativeAlbumArt, NativeConfigStore, NativeVideoBackend,
+    GraphicsChoice, NativeAlbumArt, NativeConfigStore, NativeVideoBackend, build_picker,
 };
 use crate::library_native::NativeLibrary;
 use crate::media_controls::{MediaCommand, MediaOs};
+use crate::shared_audio::SharedAudioWriter;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum GraphicsArg {
@@ -90,6 +92,16 @@ struct Cli {
     /// `English`).
     #[arg(long, value_name = "LANG")]
     subtitle_lang: Option<String>,
+
+    /// Enable the Bespoke shared-memory audio bridge, optionally overriding the stream name.
+    #[arg(
+        long,
+        value_name = "NAME",
+        default_missing_value = "/sparkplayer_audio",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    bespoke_shm: Option<String>,
 }
 
 /// Translate a crossterm key into the platform-neutral [`CoreKeyEvent`] the
@@ -152,12 +164,23 @@ fn main() -> Result<()> {
         (tracks, dir)
     };
 
+    let (shared_audio, shared_audio_warning) = match cli.bespoke_shm.as_deref() {
+        Some(name) => match shared_audio::open(name) {
+            Ok(shared) => (Some(shared), None),
+            Err(error) => (
+                None,
+                Some(format!("Bespoke shared-memory audio disabled: {error:#}")),
+            ),
+        },
+        None => (None, None),
+    };
+
     let mut terminal = setup_terminal().context("setting up terminal")?;
     // Picker queries the terminal — must happen after raw mode is enabled so
     // escape responses come through stdin without echoing as characters.
     let picker = build_picker(cli.graphics.into());
-
-    let audio = AudioPlayer::new()?;
+    let shared_audio_control = shared_audio.clone();
+    let audio = AudioPlayer::new(shared_audio)?;
     let video = NativeVideoBackend::new(picker.clone());
     let art = NativeAlbumArt::new(picker);
 
@@ -171,6 +194,9 @@ fn main() -> Result<()> {
         initial_dir,
         &cfg,
     );
+    if let Some(warning) = shared_audio_warning {
+        app.status = warning;
+    }
     app.preferred_subtitle_lang = cli.subtitle_lang.clone();
     app.truecolor = terminal_is_truecolor();
     if cli.video_window {
@@ -209,7 +235,13 @@ fn main() -> Result<()> {
     // it just stays off.
     let mut media = MediaOs::new().ok();
 
-    let res = run_loop(&mut terminal, &mut app, idx_rx, media.as_mut());
+    let res = run_loop(
+        &mut terminal,
+        &mut app,
+        idx_rx,
+        media.as_mut(),
+        shared_audio_control,
+    );
     restore_terminal(&mut terminal).ok();
     app.save_session();
 
@@ -254,6 +286,32 @@ fn apply_media(cmd: MediaCommand, app: &mut App) -> Result<()> {
     Ok(())
 }
 
+fn apply_shared_audio_control(shared: &SharedAudioWriter, app: &mut App) -> Result<()> {
+    let control = shared.poll_control();
+    if let Some(should_play) = control.playback
+        && should_play == app.audio.is_paused()
+    {
+        app.audio.toggle_pause();
+    }
+    if control.next_track {
+        app.next_track()?;
+    }
+    if control.previous_track {
+        app.prev_track()?;
+    }
+
+    if control.visualizer_delta > 0 {
+        for _ in 0..control.visualizer_delta {
+            app.cycle_visualizer();
+        }
+    } else if control.visualizer_delta < 0 {
+        for _ in 0..(-control.visualizer_delta) {
+            app.cycle_visualizer_back();
+        }
+    }
+
+    Ok(())
+}
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -314,6 +372,7 @@ fn run_loop(
     app: &mut App,
     index_rx: Receiver<Vec<Track>>,
     mut media: Option<&mut MediaOs>,
+    shared_audio: Option<SharedAudioWriter>,
 ) -> Result<()> {
     // Redraw at ~60 fps for smooth visualizers; run the heavier video/advance
     // tick at ~30 fps. Crucially the event-poll timeout below is driven by the
@@ -325,6 +384,7 @@ fn run_loop(
     let start = Instant::now();
     let mut last_tick = Instant::now();
     let mut last_draw = Instant::now();
+    let mut published_metadata_track: Option<Option<usize>> = None;
 
     loop {
         app.set_clock(start.elapsed().as_secs_f64());
@@ -336,6 +396,42 @@ fn run_loop(
         // Adopt the library index once the background scan reports in.
         if let Ok(tracks) = index_rx.try_recv() {
             app.set_search_index(tracks);
+        }
+
+        if let Some(shared) = shared_audio.as_ref() {
+            if published_metadata_track != Some(app.playing_index) {
+                let meta = &app.current_meta;
+                let title = meta
+                    .title
+                    .clone()
+                    .or_else(|| {
+                        app.playing_index
+                            .and_then(|index| app.tracks.get(index))
+                            .map(|track| track.display.clone())
+                    })
+                    .unwrap_or_default();
+                let mut info = Vec::new();
+                if let Some(rate) = meta.sample_rate {
+                    info.push(format!("{rate} Hz"));
+                }
+                if let Some(channels) = meta.channels {
+                    info.push(format!("{channels} ch"));
+                }
+                if let Some(bitrate) = meta.bitrate {
+                    info.push(format!("{bitrate} kbps"));
+                }
+                if let Some(year) = meta.year {
+                    info.push(year.to_string());
+                }
+                shared.publish_metadata(
+                    &title,
+                    meta.artist.as_deref().unwrap_or(""),
+                    meta.album.as_deref().unwrap_or(""),
+                    &info.join("  |  "),
+                );
+                published_metadata_track = Some(app.playing_index);
+            }
+            apply_shared_audio_control(shared, app)?;
         }
 
         // Apply any OS media-control requests (media keys, desktop widget).
@@ -354,10 +450,8 @@ fn run_loop(
             // one pass instead of one event per (rate-limited) redraw.
             loop {
                 match event::read()? {
-                    Event::Key(key) => {
-                        if key.kind != KeyEventKind::Release {
-                            app.handle_key(map_key(key.code, key.modifiers))?;
-                        }
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        app.handle_key(map_key(key.code, key.modifiers))?;
                     }
                     Event::Mouse(me) => {
                         if let Some(m) = map_mouse(me) {
@@ -393,4 +487,24 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn bare_bespoke_flag_does_not_consume_the_media_path() {
+        let cli = Cli::try_parse_from(["sparkplayer", "--bespoke-shm", "C:\\Music"]).unwrap();
+        assert_eq!(cli.bespoke_shm.as_deref(), Some("/sparkplayer_audio"));
+        assert_eq!(cli.path, Some(PathBuf::from("C:\\Music")));
+    }
+
+    #[test]
+    fn bespoke_stream_override_requires_and_accepts_equals() {
+        let cli = Cli::try_parse_from(["sparkplayer", "--bespoke-shm=custom"]).unwrap();
+        assert_eq!(cli.bespoke_shm.as_deref(), Some("custom"));
+    }
 }

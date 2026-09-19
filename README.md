@@ -131,11 +131,47 @@ the `Esc` menu, where ‹ › adjust the selection.
 --graphics <PROTOCOL>   Override the album-art graphics protocol.
                         One of: auto, halfblocks, sixel, kitty, iterm.
                         Default: auto.
+--bespoke-shm[=NAME]    Enable the shared-memory audio bridge for Bespoke.
+                        With no NAME, uses /sparkplayer_audio.
 ```
 
 Use `--graphics` to force a specific renderer when terminal auto-detection
 misses. On terminals such as Alacritty, only halfblocks will render — the
 terminal does not implement Sixel, Kitty, or iTerm2 inline images.
+
+### Bespoke shared-memory bridge
+
+`--bespoke-shm[=NAME]` publishes decoded audio to a stereo `f32` ring buffer for
+Bespoke/Awisp-style visualizer integrations. The bridge is opt-in and
+best-effort: if the mapping cannot be created, SparkPlayer shows a warning in
+the status line and continues without it.
+
+When `NAME` is omitted the stream name is `/sparkplayer_audio` on Unix-like
+systems and `Local\SparkPlayerAudio` on Windows. Only one SparkPlayer process
+may own a given name at a time; a second process using the same name disables
+its bridge instead of replacing or clearing the existing stream.
+
+The shared header starts with magic `SPRK`, version `2`, fixed stereo output,
+`sample_rate`, `write_frame`, `total_frames`, and `generation`. Audio frames are
+published by a release store to `write_frame`; consumers must load it with
+acquire semantics before reading the corresponding stereo `f32` frames.
+`generation` is an even-valued stream epoch. Consumers should read it before
+and after copying data, retry when it is odd or changed, and discard positions
+from an older epoch. Ring samples are not cleared between epochs.
+
+The mapping also carries a Bespoke-to-SparkPlayer control channel. A producer
+writes `transport_state` (`1` = play, `2` = pause) and then release-stores a new
+`transport_sequence`. Visualizer changes use `visualizer_delta` followed by a
+release store to `visualizer_sequence`. SparkPlayer acquire-loads each sequence
+and applies a command once whenever it changes.
+Track navigation uses `track_action` (`1` = next, `2` = previous) followed by
+`track_sequence`. Title, artist, album, and format information are published as
+fixed UTF-8 fields guarded by the even/odd `metadata_sequence`.
+
+Writer ownership is held by an OS lock rather than by the lifetime of the
+mapping. This allows Unix mappings to survive a crash or SparkPlayer's direct
+process exit while still preventing two SparkPlayer processes from publishing
+to the same stream simultaneously.
 
 ## Keyboard shortcuts
 

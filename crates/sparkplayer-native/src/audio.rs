@@ -7,18 +7,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ffmpeg_next as ffmpeg;
+use ffmpeg::ChannelLayout;
 use ffmpeg::format::sample::{Sample, Type as SampleType};
 use ffmpeg::media::Type as MediaType;
 use ffmpeg::software::resampling::Context as Resampler;
 use ffmpeg::util::frame::audio::Audio;
-use ffmpeg::ChannelLayout;
+use ffmpeg_next as ffmpeg;
 use rodio::source::{Source, UniformSourceIterator};
 use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate};
 
 use sparkplayer_core::backend::{AudioBackend, StartedTrack};
 use sparkplayer_core::library;
 use sparkplayer_core::{SampleBuffer, TrackRef};
+
+use crate::shared_audio::{SharedAudioFramePacker, SharedAudioWriter};
 
 /// Audio source backed by an ffmpeg input. Used when playing video files
 /// (and also as a generic fallback for audio formats rodio's symphonia layer
@@ -142,17 +144,23 @@ impl FfmpegAudioSource {
 
     fn frame_disposition(&mut self, frame: &Audio) -> FrameDisposition {
         let Some(target) = self.pending_seek_secs else {
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         };
         let Some(pts) = frame.pts() else {
             self.pending_seek_secs = None;
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         };
         let tb_num = self.stream_time_base.numerator() as f64;
         let tb_den = self.stream_time_base.denominator() as f64;
         if tb_den == 0.0 {
             self.pending_seek_secs = None;
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         }
         let frame_pts_secs = pts as f64 * tb_num / tb_den;
         let in_rate = frame.rate() as f64;
@@ -166,7 +174,9 @@ impl FfmpegAudioSource {
         }
         if frame_pts_secs >= target {
             self.pending_seek_secs = None;
-            return FrameDisposition::Keep { skip_interleaved: 0 };
+            return FrameDisposition::Keep {
+                skip_interleaved: 0,
+            };
         }
         let skip_per_channel = ((target - frame_pts_secs) * self.out_rate as f64).round() as i64;
         let skip_per_channel = skip_per_channel.max(0) as usize;
@@ -300,6 +310,9 @@ struct Takeover {
 struct TapSource<S> {
     inner: S,
     tap: SampleBuffer,
+    shared_audio: Option<SharedAudioWriter>,
+    shared_audio_packer: Option<SharedAudioFramePacker>,
+    shared_stream_sample_rate: Option<u32>,
     /// `Some` only for a source queued behind another, until the moment it
     /// starts playing. A source that plays immediately configures the tap up
     /// front and leaves this `None`.
@@ -310,12 +323,19 @@ impl<S> TapSource<S>
 where
     S: Source<Item = f32>,
 {
-    /// Wrap a source that starts playing right away.
-    fn new(inner: S, tap: SampleBuffer) -> Self {
-        tap.set_format(inner.channels().get(), inner.sample_rate().get());
+    fn new(inner: S, tap: SampleBuffer, shared_audio: Option<SharedAudioWriter>) -> Self {
+        let channels = inner.channels().get();
+        let sample_rate = inner.sample_rate().get();
+        tap.set_format(channels, sample_rate);
+        let shared_audio_packer = shared_audio
+            .as_ref()
+            .map(|_| SharedAudioFramePacker::new(channels));
         Self {
             inner,
             tap,
+            shared_audio,
+            shared_audio_packer,
+            shared_stream_sample_rate: Some(sample_rate),
             takeover: None,
         }
     }
@@ -323,15 +343,26 @@ where
     /// Wrap a source queued behind the playing one. The tap is left alone until
     /// this source actually reaches the output — retuning it any earlier would
     /// corrupt the position and visualizers of the track still playing.
-    fn queued(inner: S, tap: SampleBuffer, handover: Arc<Handover>) -> Self {
+    fn queued(
+        inner: S,
+        tap: SampleBuffer,
+        shared_audio: Option<SharedAudioWriter>,
+        handover: Arc<Handover>,
+    ) -> Self {
         let takeover = Takeover {
             channels: inner.channels().get(),
             sample_rate: inner.sample_rate().get(),
             handover,
         };
+        let shared_audio_packer = shared_audio
+            .as_ref()
+            .map(|_| SharedAudioFramePacker::new(takeover.channels));
         Self {
             inner,
             tap,
+            shared_audio,
+            shared_audio_packer,
+            shared_stream_sample_rate: Some(takeover.sample_rate),
             takeover: Some(takeover),
         }
     }
@@ -358,7 +389,19 @@ where
             self.tap.rebase(Duration::ZERO);
             t.handover.started.store(true, Ordering::Release);
         }
+        if let Some(sample_rate) = self.shared_stream_sample_rate.take()
+            && let Some(shared) = self.shared_audio.as_ref()
+        {
+            shared.begin_stream(sample_rate);
+        }
         self.tap.push(v);
+        if let (Some(shared), Some(packer)) = (
+            self.shared_audio.as_ref(),
+            self.shared_audio_packer.as_mut(),
+        ) && let Some((left, right)) = packer.push_sample(v)
+        {
+            shared.push_frame(left, right);
+        }
         Some(v)
     }
 }
@@ -386,7 +429,8 @@ where
 fn open_input(path: &Path) -> Result<ffmpeg::format::context::Input> {
     ffmpeg::init().ok();
     ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Fatal);
-    ffmpeg::format::input(&path.to_path_buf()).with_context(|| format!("opening {}", path.display()))
+    ffmpeg::format::input(&path.to_path_buf())
+        .with_context(|| format!("opening {}", path.display()))
 }
 
 /// Open a plain audio file through rodio's symphonia decoder, returning the
@@ -495,6 +539,7 @@ pub struct AudioPlayer {
     pub tap: SampleBuffer,
     volume: f32,
     pub current_path: Option<PathBuf>,
+    shared_audio: Option<SharedAudioWriter>,
     /// Audio tracks of the current file (only populated for video containers).
     audio_tracks: Vec<AudioTrackInfo>,
     /// Index into `audio_tracks` of the track currently being decoded.
@@ -504,7 +549,7 @@ pub struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    pub fn new() -> Result<Self> {
+    pub fn new(shared_audio: Option<SharedAudioWriter>) -> Result<Self> {
         let mut sink = DeviceSinkBuilder::open_default_sink()
             .context("failed to open default audio output")?;
         sink.log_on_drop(false);
@@ -516,6 +561,7 @@ impl AudioPlayer {
             tap,
             volume: 0.8,
             current_path: None,
+            shared_audio,
             audio_tracks: Vec::new(),
             active_audio_track: 0,
             preloaded: None,
@@ -544,12 +590,16 @@ impl AudioPlayer {
             self.active_audio_track = default_idx;
             let source = self.open_video_audio(path)?;
             let total = source.total_duration();
-            let tapped = TapSource::new(source, self.tap.clone());
+            let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
             self.player.append(tapped);
             total
         } else {
             let (source, total) = open_audio_source(path)?;
-            self.player.append(TapSource::new(source, self.tap.clone()));
+            self.player.append(TapSource::new(
+                source,
+                self.tap.clone(),
+                self.shared_audio.clone(),
+            ));
             total
         };
         self.player.play();
@@ -566,7 +616,7 @@ impl AudioPlayer {
         if library::is_video_file(path) {
             let mut source = self.open_video_audio(path)?;
             source.seek(target)?;
-            let tapped = TapSource::new(source, self.tap.clone());
+            let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
             self.player.append(tapped);
         } else {
             let file = File::open(path)?;
@@ -576,13 +626,13 @@ impl AudioPlayer {
             // discards every sample from the start of the file, so the delay
             // grows the further into the track we seek.
             if source.try_seek(target).is_ok() {
-                let tapped = TapSource::new(source, self.tap.clone());
+                let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
                 self.player.append(tapped);
             } else {
                 let file = File::open(path)?;
                 let source = Decoder::new(BufReader::new(file))?;
                 let skipped = source.skip_duration(target);
-                let tapped = TapSource::new(skipped, self.tap.clone());
+                let tapped = TapSource::new(skipped, self.tap.clone(), self.shared_audio.clone());
                 self.player.append(tapped);
             }
         }
@@ -614,7 +664,7 @@ impl AudioPlayer {
 
         let mut source = self.open_video_audio(&path)?;
         source.seek(target)?;
-        let tapped = TapSource::new(source, self.tap.clone());
+        let tapped = TapSource::new(source, self.tap.clone(), self.shared_audio.clone());
         self.player.append(tapped);
 
         if was_paused {
@@ -666,6 +716,7 @@ impl AudioPlayer {
         self.player.append(TapSource::queued(
             source,
             self.tap.clone(),
+            self.shared_audio.clone(),
             handover.clone(),
         ));
         self.preloaded = Some(Preloaded {
@@ -741,6 +792,9 @@ impl AudioBackend for AudioPlayer {
         self.cancel_preload();
         self.player.stop();
         self.tap.reset();
+        if let Some(shared) = self.shared_audio.as_ref() {
+            shared.end_stream();
+        }
         self.current_path = None;
     }
 
@@ -863,7 +917,7 @@ mod tests {
     fn queued_source_takes_the_tap_over_on_its_first_sample() {
         let tap = tap_mid_track();
         let handover = Arc::new(Handover::default());
-        let mut source = TapSource::queued(queued_buffer(), tap.clone(), handover.clone());
+        let mut source = TapSource::queued(queued_buffer(), tap.clone(), None, handover.clone());
 
         // Constructing it must not disturb the track still playing: rodio holds
         // the source in its queue for as long as that one keeps producing.
@@ -892,7 +946,7 @@ mod tests {
     fn cancelled_queue_yields_nothing_and_leaves_the_tap_alone() {
         let tap = tap_mid_track();
         let handover = Arc::new(Handover::default());
-        let mut source = TapSource::queued(queued_buffer(), tap.clone(), handover.clone());
+        let mut source = TapSource::queued(queued_buffer(), tap.clone(), None, handover.clone());
         let mid_track_pos = tap.position();
 
         handover.cancelled.store(true, Ordering::Release);
@@ -908,10 +962,13 @@ mod tests {
     #[test]
     fn immediately_playing_source_configures_the_tap_up_front() {
         let tap = tap_mid_track();
-        let mut source = TapSource::new(queued_buffer(), tap.clone());
+        tap.reset();
+        tap.set_base_offset(Duration::from_secs(60));
+        let mut source = TapSource::new(queued_buffer(), tap.clone(), None);
         // No handover to wait for — this one is the track being started.
         assert_eq!(tap.sample_rate(), 8_000);
         assert_eq!(source.next(), Some(0.25));
+        assert!(tap.position() >= Duration::from_secs(60));
     }
 
     /// Write a mono 16-bit PCM WAV holding a constant `value` — a flat signal
@@ -978,13 +1035,18 @@ mod tests {
         let (a, _) = open_audio_source(first).expect("opening the first track");
         let (b, _) = open_audio_source(second).expect("opening the second track");
         let (channels, rate) = (a.channels(), a.sample_rate());
-        player.append(TapSource::new(a, tap.clone()));
+        player.append(TapSource::new(a, tap.clone(), None));
         let b: Box<dyn Source + Send> = if b.channels() == channels && b.sample_rate() == rate {
             b
         } else {
             Box::new(UniformSourceIterator::new(b, channels, rate))
         };
-        player.append(TapSource::queued(b, tap, Arc::new(Handover::default())));
+        player.append(TapSource::queued(
+            b,
+            tap,
+            None,
+            Arc::new(Handover::default()),
+        ));
         let mut mixed = UniformSourceIterator::new(
             queue,
             ChannelCount::new(2).unwrap(),
@@ -1047,7 +1109,7 @@ mod tests {
     /// the samples this asserts on untouched.
     #[test]
     fn preloaded_track_takes_over_the_output_when_the_first_ends() {
-        let Ok(mut player) = AudioPlayer::new() else {
+        let Ok(mut player) = AudioPlayer::new(None) else {
             eprintln!("skipping: no audio output device");
             return;
         };
