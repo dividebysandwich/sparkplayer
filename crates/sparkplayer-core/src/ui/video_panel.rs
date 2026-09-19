@@ -29,6 +29,7 @@ pub(super) fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+
     // Reserve a fixed-height strip below the video whenever a subtitle track is
     // active, so the video frame doesn't shift as cues come and go.
     const SUB_STRIP_ROWS: u16 = 2;
@@ -79,7 +80,7 @@ pub(super) fn draw_video(frame: &mut Frame, area: Rect, app: &mut App) {
 /// Greedy word-wrap a subtitle string to `width` columns, capped at `max_lines`.
 /// Honors existing `\n` line breaks. The last line is truncated with `…` when
 /// content overflows `max_lines`.
-fn wrap_subtitle(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+pub(super) fn wrap_subtitle(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     if width == 0 || max_lines == 0 {
         return Vec::new();
     }

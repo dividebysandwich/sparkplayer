@@ -45,6 +45,42 @@ pub fn load_for_video(video_path: &Path) -> SubtitleSet {
     set
 }
 
+pub fn load_for_audio(audio_path: &Path) -> SubtitleSet {
+    let set = SubtitleSet::default();
+
+    // Sidecar .lrc is fast — synchronous, like SRT/VTT sidecars.
+    if let Some(track) = discover_lrc_sidecar(audio_path) {
+        set.extend(vec![track]);
+        return set; // sidecar wins outright; skip the embedded-tag thread
+    }
+
+    // Embedded tag lyrics: cheap, but still off the calling thread since
+    // play_index shouldn't block on any disk I/O.
+    let path = audio_path.to_path_buf();
+    let set_t = set.clone();
+    let _ = thread::Builder::new()
+    .name("sparkplayer-lyrics".into())
+    .spawn(move || {
+        if set_t.is_cancelled() { return; }
+        if let Some(track) = crate::metadata_native::extract_embedded_lyrics(&path) {
+            if !set_t.is_cancelled() {
+                set_t.extend(vec![track]);
+            }
+        }
+    });
+
+    set
+}
+
+fn discover_lrc_sidecar(audio_path: &Path) -> Option<SubtitleTrack> {
+    let lrc_path = audio_path.with_extension("lrc");
+    let bytes = std::fs::read(&lrc_path).ok()?;
+    let text = subtitles::decode_text(&bytes);
+    let cues = subtitles::parse_lrc(&text);
+    if cues.is_empty() { return None; }
+    Some(SubtitleTrack { label: "Lyrics (sidecar)".into(), language: None, cues })
+}
+
 fn extract_embedded(
     video_path: &Path,
     set: &SubtitleSet,

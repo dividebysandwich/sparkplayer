@@ -226,6 +226,9 @@ pub trait MediaLibrary {
     fn read_metadata(&self, source: &TrackRef) -> TrackMeta;
     fn find_cover(&self, source: &TrackRef) -> Option<Vec<u8>>;
     fn load_subtitles(&self, source: &TrackRef) -> SubtitleSet;
+    fn load_lyrics(&self, _source: &TrackRef) -> SubtitleSet {
+        SubtitleSet::default()
+    }
     /// Write `tracks` to an M3U playlist file at `path`. Default: unsupported
     /// (web has no filesystem to write to).
     fn save_playlist(&self, _path: &Path, _tracks: &[Track]) -> anyhow::Result<()> {

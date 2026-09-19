@@ -1,15 +1,13 @@
 //! Filesystem metadata extraction via `lofty`. Produces the platform-agnostic
 //! [`TrackMeta`] consumed by the core UI.
-
 use std::path::Path;
-
 use anyhow::Result;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::Accessor;
-
+use lofty::tag::{Accessor, ItemKey};
 use sparkplayer_core::metadata::TrackMeta;
+use sparkplayer_core::subtitles::{self, SubtitleTrack};
 
 pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
     let tagged = Probe::open(path)?.read()?;
@@ -18,7 +16,6 @@ pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
     let sample_rate = props.sample_rate();
     let channels = props.channels();
     let bitrate = props.audio_bitrate();
-
     let mut meta = TrackMeta {
         duration,
         sample_rate,
@@ -26,7 +23,6 @@ pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
         bitrate,
         ..Default::default()
     };
-
     if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
         meta.title = tag.title().map(|s| s.to_string());
         meta.artist = tag.artist().map(|s| s.to_string());
@@ -34,7 +30,6 @@ pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
         meta.year = tag.date().map(|d| d.year as u32);
         meta.track_no = tag.track();
     }
-
     // Sweep every tag for embedded pictures and pick the highest-quality one.
     let mut best_score = -1i32;
     for tag in tagged.tags() {
@@ -55,7 +50,6 @@ pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
             }
         }
     }
-
     Ok(meta)
 }
 
@@ -68,4 +62,33 @@ fn mime_name(mime: Option<&MimeType>) -> &'static str {
         Some(MimeType::Tiff) => "image/tiff",
         _ => "application/octet-stream",
     }
+}
+
+/// Scan every tag for embedded synced lyrics (a `USLT`/`Lyrics` field
+/// containing LRC-style `[mm:ss.xx]` timestamps) and return the longest one
+/// found, parsed into a [`SubtitleTrack`]. `None` when no tag has any, or the
+/// text found doesn't parse into at least one timed line — plain (unsynced)
+/// lyrics text is deliberately not returned, since it can't drive a cue.
+pub fn extract_embedded_lyrics(path: &Path) -> Option<SubtitleTrack> {
+    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let mut best_raw = String::new();
+    for tag in tagged.tags() {
+        if let Some(l) = tag.get_string(ItemKey::Lyrics) {
+            if l.len() > best_raw.len() {
+                best_raw = l.to_string();
+            }
+        }
+    }
+    if best_raw.is_empty() {
+        return None;
+    }
+    let cues = subtitles::parse_lrc(&best_raw);
+    if cues.is_empty() {
+        return None;
+    }
+    Some(SubtitleTrack {
+        label: "Lyrics (embedded)".to_string(),
+         language: None,
+         cues,
+    })
 }

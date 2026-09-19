@@ -380,6 +380,7 @@ fn run_loop(
         if last_tick.elapsed() >= tick_dur {
             app.check_advance()?;
             app.tick_video();
+            app.tick_lyrics();
             last_tick = Instant::now();
         }
 

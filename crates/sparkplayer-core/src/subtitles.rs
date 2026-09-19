@@ -36,6 +36,45 @@ pub struct SubtitleSet {
 }
 
 impl SubtitleSet {
+
+    /// For a "karaoke context" display: up to `before` preceding cues, the cue
+    /// active at `secs` (if any), and up to `after` upcoming cues, as plain text,
+    /// in chronological order. Cues never overlap, so "current" is unambiguous;
+    /// in a gap between cues there is no current line.
+    pub fn context_at(
+        &self,
+        track_idx: usize,
+        secs: f64,
+        before: usize,
+        after: usize,
+    ) -> (Vec<String>, Option<String>, Vec<String>) {
+        let Ok(guard) = self.inner.tracks.lock() else {
+            return (Vec::new(), None, Vec::new());
+        };
+        let Some(track) = guard.get(track_idx) else {
+            return (Vec::new(), None, Vec::new());
+        };
+        let cues = &track.cues;
+        if cues.is_empty() {
+            return (Vec::new(), None, Vec::new());
+        }
+        let i = cues.partition_point(|c| c.start_secs <= secs);
+        let active = (i > 0 && cues[i - 1].end_secs >= secs).then(|| i - 1);
+        let (split, current) = match active {
+            Some(ai) => (ai, Some(cues[ai].text.clone())),
+            None => (i, None),
+        };
+        let start = split.saturating_sub(before);
+        let prev = cues[start..split].iter().map(|c| c.text.clone()).collect();
+        let up_from = if active.is_some() { split + 1 } else { split };
+        let end = (up_from + after).min(cues.len());
+        let upcoming = cues
+        .get(up_from..end)
+        .map(|s| s.iter().map(|c| c.text.clone()).collect())
+        .unwrap_or_default();
+        (prev, current, upcoming)
+    }
+
     pub fn track_count(&self) -> usize {
         self.inner.tracks.lock().map(|g| g.len()).unwrap_or(0)
     }
@@ -197,6 +236,52 @@ pub fn parse_srt(text: &str) -> Vec<SubtitleCue> {
 
 pub fn parse_vtt(text: &str) -> Vec<SubtitleCue> {
     parse_srt_or_vtt(text, true)
+}
+
+/// Parse LRC-format lyrics (`[mm:ss.xx] text`, optionally multiple timestamps
+/// per line, `/`-joined variants). Each cue's `end_secs` is the next line's
+/// start, or `start + 4.0` for the last line (lyrics have no natural end).
+pub fn parse_lrc(text: &str) -> Vec<SubtitleCue> {
+    let normalized = text.replace(" / ", "\n").replace('\r', "");
+    let mut raw: Vec<(f64, String)> = Vec::new();
+
+    for line in normalized.lines() {
+        let mut rest = line;
+        let mut stamps = Vec::new();
+        while let Some(open) = rest.find('[') {
+            let Some(close) = rest[open..].find(']') else { break };
+            let close = open + close;
+            if let Some(secs) = parse_lrc_timestamp(&rest[open + 1..close]) {
+                stamps.push(secs);
+                rest = &rest[close + 1..];
+            } else {
+                break; // not a timestamp (e.g. an [ar:] header) — stop
+            }
+        }
+        let text = rest.trim();
+        if text.is_empty() || stamps.is_empty() {
+            continue;
+        }
+        for s in stamps {
+            raw.push((s, text.to_string()));
+        }
+    }
+
+    raw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = Vec::with_capacity(raw.len());
+    for i in 0..raw.len() {
+        let (start, text) = &raw[i];
+        let end = raw.get(i + 1).map(|(s, _)| *s).unwrap_or(start + 4.0);
+        out.push(SubtitleCue { start_secs: *start, end_secs: end, text: text.clone() });
+    }
+    out
+}
+
+fn parse_lrc_timestamp(s: &str) -> Option<f64> {
+    let (m, rest) = s.split_once(':')?;
+    let minutes: f64 = m.parse().ok()?;
+    let seconds: f64 = rest.parse().ok()?; // "03.50" parses fine as f64 directly
+    Some(minutes * 60.0 + seconds)
 }
 
 fn parse_srt_or_vtt(text: &str, is_vtt: bool) -> Vec<SubtitleCue> {

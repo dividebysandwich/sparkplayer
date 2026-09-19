@@ -342,12 +342,13 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4), // 0: metadata block
-            Constraint::Length(1), // 1: spacer above gauge
-            Constraint::Length(2), // 2: progress gauge (2 rows tall)
-            Constraint::Length(1), // 3: spacer
-            Constraint::Length(1), // 4: transport buttons
-            Constraint::Length(1), // 5: spacer
-            Constraint::Min(0),    // 6: status badges
+                     Constraint::Length(4), // 1: lyrics line (blank when none)
+                     Constraint::Length(1), // 2: spacer above gauge
+                     Constraint::Length(2), // 3: progress gauge
+                     Constraint::Length(1), // 4: spacer
+                     Constraint::Length(1), // 5: transport
+                     Constraint::Length(1), // 6: spacer
+                     Constraint::Min(0),    // 7: status badges
         ])
         .split(cols[0]);
 
@@ -417,29 +418,62 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
             Some(MouseControl::ToggleFavorite),
         ));
     }
-    if app.video.is_loaded() {
+    if !app.video.is_loaded() {
+        if let Some(track_idx) = app.active_subtitle_track {
+            let pos = app.position().as_secs_f64();
+            let (prev, current, upcoming) = app.subtitles.context_at(track_idx, pos, 1, 2);
+            let w = inner_layout[1].width as usize;
+            let fit = |s: &str| {
+                super::video_panel::wrap_subtitle(s, w, 1).into_iter().next().unwrap_or_default()
+            };
+            let faded2 = lerp(dim(), panel_bg(), 0.5);
+            let mut lines: Vec<Line> = Vec::with_capacity(4);
+            lines.push(match prev.first() {
+                Some(p) => Line::from(Span::styled(fit(p), Style::default().fg(dim()))),
+                       None => Line::from(""),
+            });
+            lines.push(match &current {
+                Some(c) => Line::from(Span::styled(
+                    fit(c),
+                                                   Style::default().fg(yellow()).add_modifier(Modifier::BOLD),
+                )),
+                None => Line::from(""),
+            });
+            lines.push(match upcoming.first() {
+                Some(n) => Line::from(Span::styled(fit(n), Style::default().fg(dim()))),
+                       None => Line::from(""),
+            });
+            lines.push(match upcoming.get(1) {
+                Some(n) => Line::from(Span::styled(fit(n), Style::default().fg(faded2))),
+                       None => Line::from(""),
+            });
+            frame.render_widget(
+                Paragraph::new(lines).alignment(Alignment::Center),
+                                inner_layout[1],
+            );
+        }
+        if app.subtitles.track_count() > 0 {
+            let state = if app.active_subtitle_track.is_some() { "On" } else { "Off" };
+            badges.push((badge(format!(" Lyrics: {} ", state), purple()), Some(MouseControl::CycleSubtitle)));
+        }
+    } else {
         let mode = if app.auto_av_offset { "auto" } else { "manual" };
         badges.push((
             badge(
                 format!(" A/V: {:+.0} ms ({}) ", app.av_offset_secs * 1000.0, mode),
-                cyan(),
+                    cyan(),
             ),
             None,
         ));
         if app.subtitles.track_count() > 0 {
             let sub_state = match app.active_subtitle_track {
-                Some(i) => app
-                    .subtitles
-                    .track_label(i)
-                    .unwrap_or_else(|| format!("Track {}", i + 1)),
+                Some(i) => app.subtitles.track_label(i).unwrap_or_else(|| format!("Track {}", i + 1)),
                 None => "Off".to_string(),
             };
-            badges.push((
-                badge(format!(" Subs: {} ", sub_state), purple()),
-                Some(MouseControl::CycleSubtitle),
-            ));
+            badges.push((badge(format!(" Subs: {} ", sub_state), purple()), Some(MouseControl::CycleSubtitle)));
         }
     }
+
     let (badge_lines, badge_hits) =
         layout_badges(badges, inner_layout[6].width as usize, inner_layout[6]);
     control_hits.extend(badge_hits);
