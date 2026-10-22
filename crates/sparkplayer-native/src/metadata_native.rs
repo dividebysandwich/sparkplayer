@@ -7,9 +7,10 @@ use anyhow::Result;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::Accessor;
+use lofty::tag::{Accessor, ItemKey};
 
 use sparkplayer_core::metadata::TrackMeta;
+use sparkplayer_core::subtitles::decode_text;
 
 pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
     let tagged = Probe::open(path)?.read()?;
@@ -56,6 +57,17 @@ pub fn read_metadata(path: &Path) -> Result<TrackMeta> {
         }
     }
 
+    // Lyrics: a sidecar `.lrc` wins, then any embedded tag. lofty maps ID3v2
+    // USLT, MP4 ©lyr and Vorbis LYRICS all onto ItemKey::Lyrics.
+    meta.lyrics = read_sidecar_lyrics(path).or_else(|| {
+        tagged
+            .tags()
+            .iter()
+            .find_map(|t| t.get_string(ItemKey::Lyrics))
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+    });
+
     Ok(meta)
 }
 
@@ -68,4 +80,17 @@ fn mime_name(mime: Option<&MimeType>) -> &'static str {
         Some(MimeType::Tiff) => "image/tiff",
         _ => "application/octet-stream",
     }
+}
+
+/// A `.lrc` file next to the audio file (same stem) wins over embedded tags.
+fn read_sidecar_lyrics(audio: &Path) -> Option<String> {
+    for ext in ["lrc", "LRC"] {
+        if let Ok(bytes) = std::fs::read(audio.with_extension(ext)) {
+            let text = decode_text(&bytes);
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
 }

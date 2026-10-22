@@ -91,6 +91,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    let top_h: u16 = if app.lyrics_visible() { 20 } else { 16 };
+
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)])
@@ -112,7 +114,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if has_video {
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Length(16)])
+            .constraints([Constraint::Min(8), Constraint::Length(top_h)])
             .split(body[1]);
         draw_video(frame, right[0], app);
         let bottom = Layout::default()
@@ -124,7 +126,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(16), Constraint::Min(8)])
+            .constraints([Constraint::Length(top_h), Constraint::Min(8)])
             .split(body[1]);
 
         let has_art = app.art.has_art();

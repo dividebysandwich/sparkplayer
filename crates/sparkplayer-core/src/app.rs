@@ -12,6 +12,7 @@ use crate::backend::{
 };
 use crate::config::Config;
 use crate::library::{self, Track, TrackRef};
+use crate::lyrics::Lyrics;
 use crate::metadata::TrackMeta;
 use crate::subtitles::SubtitleSet;
 use crate::theme::{self, Theme};
@@ -318,6 +319,9 @@ pub struct App {
     pub preferred_subtitle_lang: Option<String>,
     preferred_subtitle_applied: bool,
 
+    pub lyrics: Option<Lyrics>,
+    pub show_lyrics: bool,
+
     pub should_quit: bool,
     pub show_help: bool,
     /// Vertical scroll offset (in lines) of the help overlay. Clamped to the
@@ -451,6 +455,8 @@ impl App {
             last_subtitle_track_count: 0,
             preferred_subtitle_lang: None,
             preferred_subtitle_applied: false,
+            lyrics: None,
+            show_lyrics: true,
             should_quit: false,
             show_help: false,
             help_scroll: 0,
@@ -521,6 +527,29 @@ impl App {
                 filtered_indices(names.iter().map(|s| s.as_str()), q)
             }
         }
+    }
+
+    /// Re-parse lyrics from the freshly loaded metadata.
+    fn refresh_lyrics(&mut self) {
+        self.lyrics = self
+            .current_meta
+            .lyrics
+            .as_deref()
+            .and_then(Lyrics::parse_lrc);
+    }
+
+    /// Whether the lyrics strip should take space in the Now Playing panel.
+    pub fn lyrics_visible(&self) -> bool {
+        self.show_lyrics && self.lyrics.is_some()
+    }
+
+    pub fn toggle_lyrics(&mut self) {
+        self.show_lyrics = !self.show_lyrics;
+        self.status = if self.lyrics.is_none() {
+            String::from("No synced lyrics for this track")
+        } else {
+            format!("Lyrics: {}", if self.show_lyrics { "On" } else { "Off" })
+        };
     }
 
     fn selection(&self, pane: FocusPane) -> usize {
@@ -646,6 +675,7 @@ impl App {
         self.drop_preload();
         let source = self.tracks[idx].source.clone();
         self.current_meta = self.library.read_metadata(&source);
+        self.refresh_lyrics();
         if self.current_meta.artwork.is_none() {
             if let Some(bytes) = self.library.find_cover(&source) {
                 self.current_meta.artwork = Some(bytes);
@@ -935,6 +965,7 @@ impl App {
         let source = self.tracks[slot.index].source.clone();
         self.preload_tried = None;
         self.current_meta = self.library.read_metadata(&source);
+        self.refresh_lyrics();
         if self.current_meta.artwork.is_none() {
             if let Some(bytes) = self.library.find_cover(&source) {
                 self.current_meta.artwork = Some(bytes);
@@ -1075,6 +1106,7 @@ impl App {
         self.art.set_artwork(None, None);
         self.video.close();
         self.status = String::from("Playlist cleared");
+        self.lyrics = None;
     }
 
     // --- Search filter / text input ---------------------------------------
@@ -1178,6 +1210,7 @@ impl App {
                 self.video.close();
                 self.playing_index = None;
                 self.playing_track = None;
+                self.lyrics = None;
                 self.current_meta = TrackMeta::default();
                 self.current_duration = None;
                 self.art.set_artwork(None, None);
@@ -2237,6 +2270,7 @@ impl App {
         self.audio.stop();
         self.playing_index = None;
         self.playing_track = None;
+        self.lyrics = None;
         if self.video.is_loaded() {
             self.video.close();
         }
@@ -2368,6 +2402,7 @@ impl App {
             CoreKey::Char('C') => self.clear_playlist(),
             CoreKey::Char('c') => self.cycle_subtitle_track(),
             CoreKey::Char('b') => self.cycle_audio_track(),
+            CoreKey::Char('l') => self.toggle_lyrics(),
             CoreKey::Char('?') | CoreKey::Char('h') => {
                 self.show_help = true;
                 self.help_scroll = 0;

@@ -12,6 +12,7 @@ pub mod audio_tap;
 pub mod backend;
 pub mod config;
 pub mod library;
+pub mod lyrics;
 pub mod metadata;
 pub mod subtitles;
 pub mod theme;

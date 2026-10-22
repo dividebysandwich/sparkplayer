@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap};
 
 use crate::app::{App, FocusPane, InputMode, MouseControl};
+use crate::lyrics::LyricLine;
 
 use super::palette::{cyan, dim, green, lerp, panel_bg, pink, purple, red, text, yellow};
 
@@ -338,18 +339,35 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         ]),
     ];
 
-    let inner_layout = Layout::default()
+    let show_lyrics = app.lyrics_visible();
+    let mut cons = vec![
+        Constraint::Length(4), // metadata block
+        Constraint::Length(1), // spacer above gauge
+        Constraint::Length(2), // progress gauge (2 rows tall)
+        Constraint::Length(1), // spacer
+    ];
+    if show_lyrics {
+        cons.push(Constraint::Length(3)); // lyrics
+        cons.push(Constraint::Length(1)); // spacer
+    }
+    cons.extend([
+        Constraint::Length(1), // transport buttons
+        Constraint::Length(1), // spacer
+        Constraint::Min(0),    // status badges
+    ]);
+    let r = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4), // 0: metadata block
-            Constraint::Length(1), // 1: spacer above gauge
-            Constraint::Length(2), // 2: progress gauge (2 rows tall)
-            Constraint::Length(1), // 3: spacer
-            Constraint::Length(1), // 4: transport buttons
-            Constraint::Length(1), // 5: spacer
-            Constraint::Min(0),    // 6: status badges
-        ])
+        .constraints(cons)
         .split(cols[0]);
+    // Present the same 7-slot shape as before so the code below is unchanged.
+    let (inner_layout, lyrics_area): ([Rect; 7], Option<Rect>) = if show_lyrics {
+        (
+            [r[0], r[1], r[2], r[3], r[6], r[7], r[8]],
+            Some(r[4]),
+        )
+    } else {
+        ([r[0], r[1], r[2], r[3], r[4], r[5], r[6]], None)
+    };
 
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: true }),
@@ -383,6 +401,9 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         &total,
         app.clock_secs as f32,
     );
+    if let Some(area) = lyrics_area {
+        draw_lyrics(frame, area, app);
+    }
 
     // Cassette-deck transport row: rewind · stop · play/pause · fast-forward.
     let mut control_hits = draw_transport(frame, inner_layout[4], app);
@@ -450,6 +471,43 @@ pub(super) fn draw_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 
     draw_volume_column(frame, cols[1], app);
+}
+
+/// Three-line synced lyrics view: previous / `> current` / next.
+fn draw_lyrics(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(lyrics) = app.lyrics.as_ref() else {
+        return;
+    };
+    if area.width < 4 || area.height == 0 {
+        return;
+    }
+    let (prev, cur, next) = lyrics.context(app.position().as_secs_f64());
+
+    fn text_of(l: Option<&LyricLine>) -> String {
+        match l {
+            Some(l) if l.text.is_empty() => "♪".to_string(),
+            Some(l) => l.text.clone(),
+            None => String::new(),
+        }
+    }
+
+    let side = Style::default().fg(dim());
+    let lines = vec![
+        Line::from(vec![Span::raw("  "), Span::styled(text_of(prev), side)]),
+        Line::from(vec![
+            Span::styled(
+                "> ",
+                Style::default().fg(pink()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                text_of(cur),
+                Style::default().fg(yellow()).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![Span::raw("  "), Span::styled(text_of(next), side)]),
+    ];
+    // No Wrap: overlong lines are clipped, so the 3-row layout never shifts.
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Render the centered cassette-deck transport row into `area` and return each

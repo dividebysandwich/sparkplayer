@@ -17,4 +17,7 @@ pub struct TrackMeta {
     pub bitrate: Option<u32>,
     pub artwork: Option<Vec<u8>>,
     pub artwork_mime: Option<String>,
+    /// Raw lyrics text (LRC with timestamps, or plain text). Filled by the
+    /// native crate from a sidecar `.lrc` or an embedded tag.
+    pub lyrics: Option<String>,
 }

@@ -94,6 +94,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  [ / ]          A/V sync offset -25ms / +25ms (video)"),
         Line::from("  b              cycle audio track (video)"),
         Line::from("  c              cycle subtitle track (video)"),
+        Line::from("  l              toggle synced lyrics"),
         Line::from(""),
         section("Navigation"),
         Line::from("  ↑ / ↓          move selection"),
